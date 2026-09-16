@@ -20,4 +20,5 @@ using StableRNGs
     include("test_io_stellarcollapse.jl")
     include("test_check.jl")
     include("test_adapter_tail.jl")
+    include("test_adapter.jl")
 end

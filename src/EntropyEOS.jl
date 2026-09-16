@@ -74,7 +74,7 @@ export
     add_attribute!, has_attribute, attribute, attribute_names, energy_shift,
     density, temperature, electron_fraction,
     # Adapter build and checking
-    BuildOptions, AdapterAudit, MonotonicityAudit, AuditLoc, EOSTable,
+    BuildOptions, AdapterAudit, MonotonicityAudit, AuditLoc, EOSTable, build_eos,
     CheckOptions, CheckReport, CheckClassResult, CheckLoc,
     # Synthetic tables
     SyntheticOptions, SeededViolation, FlattenDefect, WiggleDefect, OffsetDefect,
@@ -87,7 +87,6 @@ export
     MEV_TO_ERG, K_B_ERG_PER_K, C_LIGHT_CM_S, M_AMU_G, M_NEUTRON_G, M_B_DEFAULT_G
 
 # Exported as each milestone lands: prim2con, con2prim, con2prim_safe,
-# default_policy, check_prim_state, project_prim_state, check_con_state,
-# build_eos.
+# default_policy, check_prim_state, project_prim_state, check_con_state.
 
 end # module EntropyEOS
