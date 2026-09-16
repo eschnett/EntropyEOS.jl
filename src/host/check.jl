@@ -174,7 +174,7 @@ end
 """
 A class that could not be evaluated because a field it needs is absent.
 
-`max`/`rms` are NaN, which [`show`](@ref) renders as "skipped" rather than as a
+`max`/`rms` are NaN, which `show` renders as "skipped" rather than as a
 misleadingly clean zero.
 """
 skipped_class(::Type{T}, name::AbstractString) where {T} =

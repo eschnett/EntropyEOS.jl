@@ -118,13 +118,13 @@
         v = BsplineView3(c, 0.0, 0.5, 1.0, 0.25, 0.1, 0.05)
         g(v, x, u, y) = bspline_eval3(v, x, u, y).f
         g(v, 1.3, 1.4, 0.22)
-        @test @allocated(g(v, 1.3, 1.4, 0.22)) == 0
+        @test_noallocs @allocated(g(v, 1.3, 1.4, 0.22))
         @test (@inferred bspline_eval3(v, 1.3, 1.4, 0.22)) isa BsplineEval3{Float64}
 
         c32 = ones(Float32, 9, 8, 7)
         v32 = BsplineView3(c32, 0.0f0, 0.5f0, 1.0f0, 0.25f0, 0.1f0, 0.05f0)
         @test (@inferred bspline_eval3(v32, 1.3f0, 1.4f0, 0.22f0)) isa BsplineEval3{Float32}
         g(v32, 1.3f0, 1.4f0, 0.22f0)
-        @test @allocated(g(v32, 1.3f0, 1.4f0, 0.22f0)) == 0
+        @test_noallocs @allocated(g(v32, 1.3f0, 1.4f0, 0.22f0))
     end
 end

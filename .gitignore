@@ -1,3 +1,6 @@
 Manifest*.toml
 docs/build
 OLD
+*.cov
+*.jl.*.cov
+*.jl.mem

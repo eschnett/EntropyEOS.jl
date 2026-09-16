@@ -233,7 +233,7 @@ end
     @testset "allocation-free and type-generic" begin
         ρ, yₑ = v.κ * E.density(tbl, 20), 0.3
         s = synthetic_s(E.density(tbl, 20), E.temperature(tbl, 15), yₑ, opts)
-        @test _eval_allocs(v, ρ, s, yₑ, NaN) == 0
+        @test_noallocs _eval_allocs(v, ρ, s, yₑ, NaN)
         @test (@inferred evaluate(v, ρ, s, yₑ, NaN)) isa EOSPoint{Float64}
 
         v32 = E.narrow(v, Float32)
@@ -241,6 +241,6 @@ end
         pt32 = evaluate(v32, Float32(ρ), Float32(s), Float32(yₑ), NaN32)
         @test pt32 isa EOSPoint{Float32}
         @test isfinite(pt32.U) && isfinite(pt32.p)
-        @test _eval_allocs(v32, Float32(ρ), Float32(s), Float32(yₑ), NaN32) == 0
+        @test_noallocs _eval_allocs(v32, Float32(ρ), Float32(s), Float32(yₑ), NaN32)
     end
 end

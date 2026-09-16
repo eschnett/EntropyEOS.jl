@@ -104,7 +104,7 @@ end
     end
 
     @testset "allocation-free and type-generic" begin
-        @test _p2c_allocs(v, ρ, s, yₑ, 0.8, 0.1ρ, 0.3, u0) == 0
+        @test_noallocs _p2c_allocs(v, ρ, s, yₑ, 0.8, 0.1ρ, 0.3, u0)
         @test (@inferred prim2con(v, ρ, s, yₑ, 0.8, 0.1ρ, 0.3, u0)) isa Prim2ConOut{Float64}
         v32 = E.narrow(v, Float32)
         c32 = prim2con(v32, Float32(ρ), Float32(s), Float32(yₑ), 0.8f0, Float32(0.1ρ), 0.3f0, NaN32)

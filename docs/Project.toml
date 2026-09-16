@@ -1,3 +1,6 @@
 [deps]
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 EntropyEOS = "75b96802-7bb2-4b1d-85f8-8113624a580e"
+
+[sources]
+EntropyEOS = {path = ".."}

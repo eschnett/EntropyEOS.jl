@@ -4,13 +4,15 @@
 EntropyEOS
 ```
 
+## Contents
+
+```@contents
+Pages = ["tables.md", "adapter.md", "solver.md", "internals.md"]
+Depth = 2
+```
+
 ## Index
 
 ```@index
-```
-
-## API
-
-```@autodocs
-Modules = [EntropyEOS]
+Pages = ["tables.md", "adapter.md", "solver.md", "internals.md"]
 ```

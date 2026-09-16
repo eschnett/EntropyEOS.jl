@@ -226,9 +226,9 @@ end
             s = E.extended_sample(v, x, u, 0.2, spec)
             @test all(isfinite, (s.f, s.fx, s.fu, s.fy, s.fxx, s.fxu, s.fuu))
         end
-        @test _tail_allocs(v, x_lo - 1.0, u_hi + 1.0, 0.2, specσ) == 0
-        @test _tail_allocs(v, x_lo - 1.0, u_hi + 1.0, 0.2, specL) == 0
-        @test _tail_allocs(v, 0.1, 0.1, 0.2, specσ) == 0
+        @test_noallocs _tail_allocs(v, x_lo - 1.0, u_hi + 1.0, 0.2, specσ)
+        @test_noallocs _tail_allocs(v, x_lo - 1.0, u_hi + 1.0, 0.2, specL)
+        @test_noallocs _tail_allocs(v, 0.1, 0.1, 0.2, specσ)
         @test (@inferred E.extended_sample(v, x_lo - 1.0, u_hi + 1.0, 0.2, specσ)) isa BsplineEval3{Float64}
     end
 end

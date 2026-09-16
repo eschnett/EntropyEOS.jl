@@ -40,3 +40,27 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: eschnett/EntropyEOS.jl
+
+  # The kernels are allocation-free only as optimized code, so those assertions
+  # are skipped in the jobs above: julia-runtest defaults to --check-bounds=yes,
+  # which disables every @inbounds in the package, and to coverage, which blocks
+  # further optimizations. Keeping bounds checking on there is worth more than
+  # the allocation gate -- it catches real indexing bugs -- so the gate gets its
+  # own job instead of being dropped.
+  allocations:
+    name: Allocation gates (optimized build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.11"
+          arch: x64
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+        with:
+          check_bounds: "no"
+          coverage: false
+        env:
+          JULIA_NUM_THREADS: "4"

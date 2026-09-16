@@ -199,10 +199,10 @@ end
         s = 0.5 * (sr.s_min + sr.s_max)
         cin, pt = forward(ρ, s, yₑ, 0.8, 0.1ρ, 0.3)
         # The warm Newton path is the one that dominates a hydro run.
-        @test _c2p_allocs(v, cin, opts, s, 0.8, pt.u_solved) == 0
+        @test_noallocs _c2p_allocs(v, cin, opts, s, 0.8, pt.u_solved)
         @test (@inferred con2prim(v, cin, opts, s, 0.8, pt.u_solved)) isa Con2PrimOut{Float64}
         # And the fallback path, which uses the stack scratch for its scan.
         optsF = Con2PrimOptions(; max_iter_newton=0)
-        @test _c2p_allocs(v, cin, optsF, NaN, NaN, NaN) == 0
+        @test_noallocs _c2p_allocs(v, cin, optsF, NaN, NaN, NaN)
     end
 end

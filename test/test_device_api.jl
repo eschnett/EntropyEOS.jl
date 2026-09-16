@@ -80,9 +80,9 @@ end
     @testset "allocation-free on every entry point" begin
         # A heap allocation inside a kernel is fatal on a GPU, so these are the
         # gates that keep the port device-ready.
-        @test _allocs(_dev_eval, v, ρ, s, yₑ, NaN) == 0
-        @test _allocs(_dev_c2p, v, cin, opts) == 0
-        @test _allocs(_dev_safe, v, cin, opts, pol) == 0
+        @test_noallocs _allocs(_dev_eval, v, ρ, s, yₑ, NaN)
+        @test_noallocs _allocs(_dev_c2p, v, cin, opts)
+        @test_noallocs _allocs(_dev_safe, v, cin, opts, pol)
     end
 
     @testset "type-stable at Float64 and Float32" begin

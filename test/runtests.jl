@@ -11,8 +11,11 @@ using StaticArrays
 using Adapt
 using StableRNGs
 
+
 # Ordered by dependency, so the first failing testset is the lowest broken
 # layer rather than the alphabetically first one.
+include("testutil.jl")
+
 @testset "EntropyEOS" begin
     include("test_defs.jl")
     include("test_bspline_eval.jl")
