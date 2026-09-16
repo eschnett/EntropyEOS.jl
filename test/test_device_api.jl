@@ -2,9 +2,20 @@
 _dev_eval(v, ρ, s, y, u) = EntropyEOS.evaluate(v, ρ, s, y, u).U
 _dev_c2p(v, cin, opts) = EntropyEOS.con2prim(v, cin, opts).ρ
 _dev_safe(v, cin, opts, pol) = EntropyEOS.con2prim_safe(v, cin, opts, pol).base.ρ
-function _allocs(f, args...)
-    f(args...)
-    return @allocated f(args...)
+# One helper per entry point rather than a varargs `_allocs(f, args...)`: the
+# splat itself allocates on x86-64, and the measurement then reports the
+# harness instead of the kernel.
+function _dev_eval_allocs(v, ρ, s, y, u)
+    _dev_eval(v, ρ, s, y, u)
+    return @allocated _dev_eval(v, ρ, s, y, u)
+end
+function _dev_c2p_allocs(v, cin, opts)
+    _dev_c2p(v, cin, opts)
+    return @allocated _dev_c2p(v, cin, opts)
+end
+function _dev_safe_allocs(v, cin, opts, pol)
+    _dev_safe(v, cin, opts, pol)
+    return @allocated _dev_safe(v, cin, opts, pol)
 end
 
 @testset "device readiness" begin
@@ -80,9 +91,9 @@ end
     @testset "allocation-free on every entry point" begin
         # A heap allocation inside a kernel is fatal on a GPU, so these are the
         # gates that keep the port device-ready.
-        @test_noallocs _allocs(_dev_eval, v, ρ, s, yₑ, NaN)
-        @test_noallocs _allocs(_dev_c2p, v, cin, opts)
-        @test_noallocs _allocs(_dev_safe, v, cin, opts, pol)
+        @test_noallocs _dev_eval_allocs(v, ρ, s, yₑ, NaN)
+        @test_noallocs _dev_c2p_allocs(v, cin, opts)
+        @test_noallocs _dev_safe_allocs(v, cin, opts, pol)
     end
 
     @testset "type-stable at Float64 and Float32" begin
