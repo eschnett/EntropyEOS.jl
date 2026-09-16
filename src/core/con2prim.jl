@@ -18,7 +18,7 @@
 
 Conserved state handed to the solver, all components in κ-rescaled g/cm³.
 """
-struct Con2PrimIn{T<:AbstractFloat}
+struct Con2PrimIn{T<:Real}
     D::T
     τ::T
     D_Y::T
@@ -34,7 +34,7 @@ Solver knobs. Every default was measured at `Float64`; see `defs.jl` for how
 the tolerances behave at other scalar types, and note that the physics is not
 validated below `Float64`.
 """
-struct Con2PrimOptions{T<:AbstractFloat}
+struct Con2PrimOptions{T<:Real}
     tol::T
     max_iter_newton::Int32
     max_iter_1d::Int32
@@ -80,7 +80,7 @@ A failed solve still returns a fully populated best-effort state -- the best
 iterate found, judged by the scaled residual norm. `result` reports what the
 solver did; it is not a validity signal.
 """
-struct Con2PrimOut{T<:AbstractFloat}
+struct Con2PrimOut{T<:Real}
     ρ::T
     s::T
     ye::T
@@ -105,7 +105,7 @@ The two residuals are the momentum residual `f₁ = sinh(w) - cosh(w)·V`,
 deliberately not squared so the S → 0 root stays simple rather than double,
 and the normalized energy residual `f₂ = (τ_model - τ)/max(τ, τ_floor_rel·D)`.
 """
-struct Residuals{T<:AbstractFloat}
+struct Residuals{T<:Real}
     s::T
     w::T
     ρ::T
@@ -124,7 +124,7 @@ struct Residuals{T<:AbstractFloat}
 end
 
 """Outcome of the fallback's multi-point bracket search over `s`."""
-struct BracketScanResult{T<:AbstractFloat}
+struct BracketScanResult{T<:Real}
     bracketed::Bool
     s_lo::T
     s_hi::T
@@ -132,7 +132,7 @@ struct BracketScanResult{T<:AbstractFloat}
 end
 
 """A manufactured cold start: an exact seed derived without any prior iterate."""
-struct ColdSeed{T<:AbstractFloat}
+struct ColdSeed{T<:Real}
     s::T
     w::T
     u::T

@@ -62,9 +62,10 @@ export
     Status, C2PResult,
     # B-splines
     BsplineView1, BsplineView3, BsplineEval1, BsplineEval3,
-    bspline_eval1, bspline_eval3,
+    bspline_eval1, bspline_eval3, BandedLU, fit_bspline_1d, fit_bspline_3d,
     # Adapter
     EOSPoint, SRange, UHighTailInfo, EOSTableView, narrow,
+    evaluate, eval_at, srange, srange_extended, sigma_extended, u_high_tail_info,
     # Solver
     Prim2ConOut, Con2PrimIn, Con2PrimOptions, Con2PrimOut,
     PolicyOptions, PrimState, Con2PrimSafeOut,
@@ -78,13 +79,15 @@ export
     # Synthetic tables
     SyntheticOptions, SeededViolation, FlattenDefect, WiggleDefect, OffsetDefect,
     StiffenDefect, SetValue,
+    make_synthetic_table, dirty_synthetic_options,
+    synthetic_eps, synthetic_p, synthetic_s, synthetic_cs2,
+    # Loading and checking
+    read_stellarcollapse, check_table,
     # Units
     MEV_TO_ERG, K_B_ERG_PER_K, C_LIGHT_CM_S, M_AMU_G, M_NEUTRON_G, M_B_DEFAULT_G
 
-# Exported as each milestone lands: evaluate, eval_at, srange, srange_extended,
-# prim2con, con2prim, con2prim_safe, default_policy, check_prim_state,
-# project_prim_state, check_con_state, fit_bspline_1d, fit_bspline_3d,
-# build_eos, check_table, make_synthetic_table, dirty_synthetic_options,
-# read_stellarcollapse.
+# Exported as each milestone lands: prim2con, con2prim, con2prim_safe,
+# default_policy, check_prim_state, project_prim_state, check_con_state,
+# build_eos.
 
 end # module EntropyEOS

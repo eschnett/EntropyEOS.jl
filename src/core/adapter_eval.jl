@@ -38,7 +38,7 @@ consistent, and conflating them is a silent physics bug.
 call -- there is no hidden mutable state anywhere, which is what makes
 evaluation re-entrant and safe to call in parallel across grid points.
 """
-struct EOSPoint{T<:AbstractFloat}
+struct EOSPoint{T<:Real}
     U::T
     U_ρ::T
     U_s::T
@@ -64,7 +64,7 @@ The physical domain in `(ρ, s)` is *not* rectangular: `s_max` at the highest
 density is far below `s_max` at the lowest. Every entropy clamp must therefore
 be taken at the already-clamped `(ρ, Yₑ)`.
 """
-struct SRange{T<:AbstractFloat}
+struct SRange{T<:Real}
     s_min::T
     s_max::T
 end
@@ -76,7 +76,7 @@ Diagnostics for the high-temperature tail at one seam point: how the causal
 cap and the monotonicity floor interacted. Audit hook only; nothing in the
 run-time path reads it.
 """
-struct UHighTailInfo{T<:AbstractFloat}
+struct UHighTailInfo{T<:Real}
     α::T           # σ's log-tail growth rate dln(σ)/du; 0 if the log tail is inactive
     b_raw::T       # L's asymptotic b = dln(ε̂)/du after the floor, before the cap
     b_cap::T       # the causal cap on b, (1 + cs²_ext_cap)·α; 0 if inactive
@@ -97,7 +97,7 @@ end
 # ---------------------------------------------------------------------------
 
 """Value, slope and curvature of one 1-D track at a seam."""
-struct Track1D{T<:AbstractFloat}
+struct Track1D{T<:Real}
     f0::T
     f1::T
     f2::T
@@ -109,14 +109,14 @@ Blend width and slope guards for one tail.
 `m_floor` enforces monotonicity and is applied *first*; `m_cap` is the causal
 cap. When the cap falls below the floor the floor wins, lexicographically.
 """
-struct TailSpec{T<:AbstractFloat}
+struct TailSpec{T<:Real}
     w::T
     m_floor::T
     m_cap::T
 end
 
 """Everything `extended_sample` needs to know about one field's extensions."""
-struct ExtSpec{T<:AbstractFloat}
+struct ExtSpec{T<:Real}
     x_lo::T
     x_hi::T
     u_lo::T
@@ -410,43 +410,47 @@ log-space tail sits entirely inside its own step, so a corner query maps out of
 log space after the first tail and back into it for the second. That costs one
 extra rounding there and keeps the two operators independent.
 """
-@inline function extended_sample(fld::BsplineView3{S}, x::T, u::T, y::T, spec::ExtSpec{T}) where {S,T}
-    u_below = u < spec.u_lo
-    u_above = u > spec.u_hi
-    x_below = x < spec.x_lo
-    x_above = x > spec.x_hi
+@inline function extended_sample(fld::BsplineView3{S}, x::T, u::T, y::T, spec::ExtSpec{P}) where {S,T,P}
+    # The spec carries its own scalar type: the coefficients may be Float64
+    # while the query coordinates are Float32 or a dual number.
+    x_lo, x_hi = T(spec.x_lo), T(spec.x_hi)
+    u_lo, u_hi = T(spec.u_lo), T(spec.u_hi)
+    u_below = u < u_lo
+    u_above = u > u_hi
+    x_below = x < x_lo
+    x_above = x > x_hi
 
-    u_seam = u_below ? spec.u_lo : (u_above ? spec.u_hi : u)
-    x_seam = x_below ? spec.x_lo : (x_above ? spec.x_hi : x)
+    u_seam = u_below ? u_lo : (u_above ? u_hi : u)
+    x_seam = x_below ? x_lo : (x_above ? x_hi : x)
 
     b = bspline_eval3(fld, x_seam, u_seam, y)
 
     if u_below || u_above
-        d = u - (u_below ? spec.u_lo : spec.u_hi)
+        d = u - (u_below ? u_lo : u_hi)
         if u_above && spec.u_high_log && b.f > zero(T)
             # The log-space entropy tail: the same machinery run on ln(σ). The
             # monotonicity floor transfers as m_floor/σ at the seam.
-            m_floor_g = spec.u_m_floor > zero(T) ? spec.u_m_floor / b.f : zero(T)
+            m_floor_g = spec.u_m_floor > 0 ? T(spec.u_m_floor) / b.f : zero(T)
             g = apply_u_tail(log_sample(b), d, TailSpec{T}(T(fld.hu), m_floor_g, zero(T)))
             b = exp_sample(g)
         else
-            m_cap = if u_above && spec.u_high_b_cap > zero(T)
-                L_slope_cap(b.f, spec.u_high_b_cap, spec.shift_hat, spec.inv_c²)
+            m_cap = if u_above && spec.u_high_b_cap > 0
+                L_slope_cap(b.f, T(spec.u_high_b_cap), T(spec.shift_hat), T(spec.inv_c²))
             else
                 zero(T)
             end
-            b = apply_u_tail(b, d, TailSpec{T}(T(fld.hu), spec.u_m_floor, m_cap))
+            b = apply_u_tail(b, d, TailSpec{T}(T(fld.hu), T(spec.u_m_floor), m_cap))
         end
     end
 
     if x_below || x_above
-        d = x - (x_below ? spec.x_lo : spec.x_hi)
+        d = x - (x_below ? x_lo : x_hi)
         xspec = TailSpec{T}(T(fld.hx), zero(T), zero(T))
         done = false
         if x_below && spec.x_low_log && b.f > zero(T)
             # No monotonicity floor here: x is clamped, never iterated.
             g = log_sample(b)
-            if xlow_log_ok(g, T(fld.hx), spec.x_lo - spec.x_ext_lo)
+            if xlow_log_ok(g, T(fld.hx), x_lo - T(spec.x_ext_lo))
                 b = exp_sample(apply_x_tail(g, d, xspec))
                 done = true
             end
@@ -489,10 +493,11 @@ end
 end
 
 """Extension parameters for the energy field, given a causal cap on `b`."""
-@inline function L_ext_spec(v::EOSTableView{T}, b_cap::T) where {T}
+@inline function L_ext_spec(v::EOSTableView{S}, b_cap::P) where {S,P}
+    T = promote_type(S, P)
     return ExtSpec{T}(
-        v.x_lo, v.x_hi, v.u_lo, v.u_hi, v.x_ext_lo, v.ext_slope_floor_L,
-        false, false, b_cap, v.shift_hat, v.inv_c²,
+        T(v.x_lo), T(v.x_hi), T(v.u_lo), T(v.u_hi), T(v.x_ext_lo), T(v.ext_slope_floor_L),
+        false, false, T(b_cap), T(v.shift_hat), T(v.inv_c²),
     )
 end
 
@@ -502,8 +507,292 @@ end
 The causal cap on `b = dln(ε̂)/du` at the high-temperature seam, namely
 `(1 + cs²_ext_cap)·α`. Zero when the entropy log tail supplied no growth rate.
 """
-@inline function u_high_b_cap(v::EOSTableView{T}, x_use::T, y::T) where {T}
-    x_seam = clamp(x_use, v.x_lo, v.x_hi)
-    α = σ_u_high_alpha(v.σ, x_seam, v.u_hi, y, v.ext_slope_floor_σ)
-    return α > zero(T) ? (one(T) + v.cs²_ext_cap) * α : zero(T)
+@inline function u_high_b_cap(v::EOSTableView{S}, x_use::T, y::T) where {S,T}
+    x_seam = clamp(x_use, T(v.x_lo), T(v.x_hi))
+    α = σ_u_high_alpha(v.σ, x_seam, T(v.u_hi), y, T(v.ext_slope_floor_σ))
+    return α > zero(T) ? (one(T) + T(v.cs²_ext_cap)) * α : zero(T)
+end
+
+# ---------------------------------------------------------------------------
+# Entropy windows
+# ---------------------------------------------------------------------------
+
+"""
+    srange(v, ρ★, yₑ)
+
+The *physical* entropy window at fixed `(ρ★, Yₑ)`: the entropy at the coldest
+and hottest tabulated temperature. Both coordinates are clamped to the physical
+box first.
+
+This is what any entropy clamp must be taken against, because the physical
+domain is not rectangular in `(ρ, s)`.
+"""
+@inline function srange(v::EOSTableView{S}, ρ★::T, yₑ::T) where {S,T}
+    x = clamp(safe_log10(ρ★), T(v.x_lo), T(v.x_hi))
+    y = clamp(yₑ, T(v.y_lo), T(v.y_hi))
+    return SRange{T}(bspline_eval3(v.σ, x, T(v.u_lo), y).f, bspline_eval3(v.σ, x, T(v.u_hi), y).f)
+end
+
+"""
+    srange_extended(v, ρ★, yₑ)
+
+The entropy window over the *extended* box, used to bracket the solver. Wider
+than [`srange`](@ref), and every value in it is still finite, smooth and
+monotone, which is what makes it safe to bisect on.
+"""
+@inline function srange_extended(v::EOSTableView{S}, ρ★::T, yₑ::T) where {S,T}
+    x = clamp(safe_log10(ρ★), T(v.x_ext_lo), T(v.x_ext_hi))
+    y = clamp(yₑ, T(v.y_lo), T(v.y_hi))
+    spec = σ_ext_spec(v)
+    return SRange{T}(
+        extended_sample(v.σ, x, T(v.u_ext_lo), y, spec).f,
+        extended_sample(v.σ, x, T(v.u_ext_hi), y, spec).f,
+    )
+end
+
+"""
+    sigma_extended(v, ρ★, u, yₑ)
+
+The extended entropy field at a given log-temperature. Strictly increasing in
+`u`, which is what the T-solve's bracketing relies on.
+"""
+@inline function sigma_extended(v::EOSTableView{S}, ρ★::T, u::T, yₑ::T) where {S,T}
+    x = clamp(safe_log10(ρ★), T(v.x_ext_lo), T(v.x_ext_hi))
+    y = clamp(yₑ, T(v.y_lo), T(v.y_hi))
+    uu = clamp(u, T(v.u_ext_lo), T(v.u_ext_hi))
+    return extended_sample(v.σ, x, uu, y, σ_ext_spec(v)).f
+end
+
+"""
+    u_high_tail_info(v, ρ★, yₑ)
+
+Recompute the high-temperature seam's clamp arithmetic at one point, exposing
+what the extension derives internally. Audit hook; nothing in the run-time path
+calls it.
+"""
+function u_high_tail_info(v::EOSTableView{S}, ρ★::T, yₑ::T) where {S,T}
+    x_seam = clamp(safe_log10(ρ★), T(v.x_lo), T(v.x_hi))
+    y = clamp(yₑ, T(v.y_lo), T(v.y_hi))
+
+    α = σ_u_high_alpha(v.σ, x_seam, T(v.u_hi), y, T(v.ext_slope_floor_σ))
+    b_cap = α > zero(T) ? (one(T) + T(v.cs²_ext_cap)) * α : zero(T)
+
+    Lb = bspline_eval3(v.L, x_seam, T(v.u_hi), y)
+    t = floor_slope(Track1D{T}(Lb.f, Lb.fu, Lb.fuu), one(T), T(v.L.hu), T(v.ext_slope_floor_L))
+    m_L_raw = phase2_slope(t, one(T), T(v.L.hu))
+    m_L_cap = b_cap > zero(T) ? L_slope_cap(Lb.f, b_cap, T(v.shift_hat), T(v.inv_c²)) : zero(T)
+
+    Eh = exp10(Lb.f) * T(v.inv_c²)
+    ε = Eh - T(v.shift_hat)
+    b_raw = ε > zero(T) ? ln10(T) * m_L_raw * Eh / ε : zero(T)
+
+    floor_wins = m_L_cap > zero(T) && v.ext_slope_floor_L > 0 && m_L_cap < T(v.ext_slope_floor_L)
+    hi = floor_wins ? T(v.ext_slope_floor_L) : m_L_cap
+    clamped = m_L_cap > zero(T) && m_L_raw > hi
+    return UHighTailInfo{T}(α, b_raw, b_cap, m_L_raw, m_L_cap, clamped, floor_wins)
+end
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
+"""
+    evaluate(v, ρ★, s, yₑ, u_guess)
+
+Evaluate the potential `U(ρ★, s, Yₑ)` and the derivatives a solver needs.
+
+`u_guess` is the previous call's `u_solved`, or `NaN` for no guess. Warm-start
+state is threaded explicitly rather than cached, so this is pure and re-entrant
+and safe to call in parallel across grid points.
+
+The density treatment is deliberately asymmetric. Below the table a designed
+extension applies and the point is merely flagged; above it the point keeps a
+hard out-of-bounds flag, because a converged state there is invalid outright --
+the tail exists only so the iteration stays finite rather than to make the
+answer meaningful.
+"""
+function evaluate(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where {S,T}
+    flags = UInt32(0)
+
+    # Locate ρ against the physical and extended boxes.
+    x = safe_log10(ρ★)
+    x_use = if x < v.x_lo
+        flags |= FLAG_EXT_ρ_LOW
+        x < v.x_ext_lo ? T(v.x_ext_lo) : x
+    elseif x > v.x_hi
+        flags |= FLAG_OOB_ρ_HIGH
+        x > v.x_ext_hi ? T(v.x_ext_hi) : x
+    else
+        x
+    end
+
+    # Yₑ has no extension: it is hard-clamped and flagged.
+    y = yₑ
+    if y < v.y_lo
+        y = T(v.y_lo)
+        flags |= FLAG_CLAMP_YE
+    elseif y > v.y_hi
+        y = T(v.y_hi)
+        flags |= FLAG_CLAMP_YE
+    end
+
+    # Solve σ_ext(x_use, u, y) = s for u on the extended bracket. The u-tail's
+    # slope floor keeps σ_ext strictly increasing in u, so the bracket is
+    # globally invertible and the safeguarded iteration cannot fail.
+    spec = σ_ext_spec(v)
+    σ_lo = extended_sample(v.σ, x_use, T(v.u_ext_lo), y, spec)
+    σ_hi = extended_sample(v.σ, x_use, T(v.u_ext_hi), y, spec)
+
+    u = zero(T)
+    iters = Int32(0)
+    if s <= σ_lo.f
+        u = T(v.u_ext_lo)          # below even the extended bracket
+    elseif s >= σ_hi.f
+        u = T(v.u_ext_hi)
+    else
+        lo = T(v.u_ext_lo)
+        hi = T(v.u_ext_hi)
+        uu = if !isnan(u_guess)
+            clamp(u_guess, lo, hi)
+        else
+            # A secant estimate from the endpoints beats a plain midpoint start.
+            clamp(lo + (hi - lo) * (s - σ_lo.f) / (σ_hi.f - σ_lo.f), lo, hi)
+        end
+
+        s_scale = abs(s) > one(T) ? abs(s) : one(T)
+        converged = false
+        while iters < v.max_iter
+            iters += one(Int32)
+            e = extended_sample(v.σ, x_use, uu, y, spec)
+            g = e.f - s
+
+            # Maintain the bracket by sign; σ_ext increases with u.
+            g < zero(T) ? (lo = uu) : (hi = uu)
+
+            if abs(g) <= tsolve_residual_tol(T) * s_scale
+                converged = true
+                break
+            end
+
+            # Newton, accepted only if it stays inside the bracket and the
+            # slope is positive there; bisect otherwise.
+            u_next = zero(T)
+            newton_ok = false
+            if e.fu > zero(T)
+                u_next = uu - g / e.fu
+                newton_ok = lo < u_next < hi
+            end
+            newton_ok || (u_next = T(0.5) * (lo + hi))
+
+            du = u_next - uu
+            uu = u_next
+
+            u_scale = abs(uu) > one(T) ? abs(uu) : one(T)
+            if abs(du) <= tsolve_step_tol(T) * u_scale
+                converged = true
+                break
+            end
+        end
+        converged || (flags |= FLAG_MAXITER)
+        u = uu
+    end
+
+    # The extension flags describe where the solve *landed*, not where the
+    # input was: with the extensions in place the solve almost always finds a
+    # genuine root out there rather than pinning at the box edge, so these mark
+    # "the answer is in the designed extension zone" and not "the input was
+    # clamped".
+    if u < v.u_lo
+        flags |= FLAG_EXT_S_LOW
+    elseif u > v.u_hi
+        flags |= FLAG_EXT_S_HIGH
+    end
+
+    return eval_at(v, x_use, u, y, flags, iters)
+end
+
+evaluate(v::EOSTableView{S}, ρ★, s, yₑ, u_guess) where {S} =
+    evaluate(v, promote(float(ρ★), float(s), float(yₑ), float(u_guess))...)
+
+"""
+    eval_at(v, x_use, u, y, flags, iters)
+
+The chain rule at an already-located point, in log-density `x_use` and
+log-temperature `u`.
+
+Three stages: undo the log₁₀ energy fit analytically; convert the log-axis
+partials to physical ones; then invert `s ↔ T` by the implicit function
+theorem, which is what turns the table's `ε(ρ,T,Yₑ)` into a genuine potential
+`U(ρ,s,Yₑ)`. A final rescaling by κ re-zeroes the energy so that `U ≥ 0`.
+"""
+function eval_at(v::EOSTableView{S}, x_use::T, u::T, y::T, flags::UInt32, iters::Int32) where {S,T}
+    σ = extended_sample(v.σ, x_use, u, y, σ_ext_spec(v))
+    # Above the seam L's tail slope is held to the causal bound, measured
+    # against the entropy tail's own growth rate. One extra sample, on this
+    # path only.
+    b_cap = u > v.u_hi ? u_high_b_cap(v, x_use, y) : zero(T)
+    Lv = extended_sample(v.L, x_use, u, y, L_ext_spec(v, b_cap))
+
+    λ = ln10(T)
+    ρ_eff = exp10(x_use)
+    T̂_t = T(v.conv_t) * exp10(u)
+
+    # Stage A, part 1: undo the log₁₀ fit. E = 10^L/c² = ε̂ + shift.
+    Eh = exp10(Lv.f) * T(v.inv_c²)
+    ε̂ = Eh - T(v.shift_hat)
+    ε_x = λ * Eh * Lv.fx
+    ε_u = λ * Eh * Lv.fu
+    ε_y = λ * Eh * Lv.fy
+    ε_xx = λ * Eh * (Lv.fxx + λ * Lv.fx * Lv.fx)
+    ε_uu = λ * Eh * (Lv.fuu + λ * Lv.fu * Lv.fu)
+    ε_xu = λ * Eh * (Lv.fxu + λ * Lv.fx * Lv.fu)
+
+    # Stage A, part 2: log-axis partials to physical ones.
+    inv_lρ = one(T) / (λ * ρ_eff)
+    inv_lρ² = inv_lρ * inv_lρ
+    inv_lT = one(T) / (λ * T̂_t)
+    inv_lT² = inv_lT * inv_lT
+    inv_lρlT = one(T) / (λ * λ * ρ_eff * T̂_t)
+
+    σ_ρ = σ.fx * inv_lρ
+    σ_ρρ = (σ.fxx - λ * σ.fx) * inv_lρ²
+    σ_T = σ.fu * inv_lT
+    σ_TT = (σ.fuu - λ * σ.fu) * inv_lT²
+    σ_ρT = σ.fxu * inv_lρlT
+    σ_y = σ.fy
+
+    ε_ρ = ε_x * inv_lρ
+    ε_ρρ = (ε_xx - λ * ε_x) * inv_lρ²
+    ε_T = ε_u * inv_lT
+    ε_TT = (ε_uu - λ * ε_u) * inv_lT²
+    ε_ρT = ε_xu * inv_lρlT
+
+    # Stage B: the implicit function theorem, inverting σ(ρ,T,Yₑ) = s for T.
+    T_s = one(T) / σ_T
+    T_ρ = -σ_ρ / σ_T
+    T_ρs = -(σ_ρT + σ_TT * T_ρ) / (σ_T * σ_T)
+    T_ρρ = -(σ_ρρ + T(2) * σ_ρT * T_ρ + σ_TT * T_ρ * T_ρ) / σ_T
+
+    Uh = ε̂
+    Uh_s = ε_T * T_s
+    Uh_ρ = ε_ρ + ε_T * T_ρ
+    Uh_ρs = ε_ρT * T_s + ε_TT * T_ρ * T_s + ε_T * T_ρs
+    Uh_ρρ = ε_ρρ + T(2) * ε_ρT * T_ρ + ε_TT * T_ρ * T_ρ + ε_T * T_ρρ
+    μh = ε_y + ε_T * (-σ_y / σ_T)
+
+    # Stage C: the κ re-zeroing, which is exact rather than an approximation --
+    # per baryon, m_B★(1 + U) = m_B(1 + ε).
+    κ = T(v.κ)
+    U = (one(T) + Uh) / κ - one(T)
+    U_ρ = Uh_ρ / κ
+    U_s = Uh_s / κ
+    U_ρρ = Uh_ρρ / κ
+    U_ρs = Uh_ρs / κ
+    μ̃ = μh / κ
+
+    p = ρ_eff * ρ_eff * U_ρ
+    h = one(T) + U + p / ρ_eff
+    cs² = (T(2) * ρ_eff * U_ρ + ρ_eff * ρ_eff * U_ρρ) / h
+
+    return EOSPoint{T}(U, U_ρ, U_s, U_ρρ, U_ρs, U_s, p, h, cs², exp10(u), μ̃, u, iters, flags)
 end

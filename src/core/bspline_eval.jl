@@ -30,7 +30,7 @@ struct BsplineView1{T<:AbstractFloat,A<:AbstractVector{T}}
     h::T
 end
 
-function BsplineView1(c::AbstractVector{T}, x0, h) where {T<:AbstractFloat}
+function BsplineView1(c::AbstractVector{T}, x0, h) where {T<:Real}
     return BsplineView1{T,typeof(c)}(c, T(x0), T(h))
 end
 
@@ -51,7 +51,7 @@ struct BsplineView3{T<:AbstractFloat,A<:AbstractArray{T,3}}
     hy::T
 end
 
-function BsplineView3(c::AbstractArray{T,3}, x0, hx, u0, hu, y0, hy) where {T<:AbstractFloat}
+function BsplineView3(c::AbstractArray{T,3}, x0, hx, u0, hu, y0, hy) where {T<:Real}
     return BsplineView3{T,typeof(c)}(c, T(x0), T(hx), T(u0), T(hu), T(y0), T(hy))
 end
 
@@ -62,7 +62,7 @@ end
 @inline npoints(v::BsplineView1) = length(v.c) - 2
 
 """Value and derivatives of a 1-D spline."""
-struct BsplineEval1{T<:AbstractFloat}
+struct BsplineEval1{T<:Real}
     f::T
     fx::T
     fxx::T
@@ -74,7 +74,7 @@ Value and the derivative set the adapter's chain rule needs.
 Deliberately missing `fyy`, `fxy` and `fuy`: nothing downstream uses them, and
 skipping them halves the per-axis basis work for the y axis.
 """
-struct BsplineEval3{T<:AbstractFloat}
+struct BsplineEval3{T<:Real}
     f::T
     fx::T
     fu::T
@@ -85,7 +85,7 @@ struct BsplineEval3{T<:AbstractFloat}
 end
 
 """One axis's cell index and local coordinate for a query point."""
-struct BsplineCell{T<:AbstractFloat}
+struct BsplineCell{T<:Real}
     i::Int   # 1-based, clamped to 1:n-1
     t::T     # in [0,1] inside the grid, extrapolated outside
 end
@@ -97,21 +97,21 @@ Locate `x` within the grid. This is the single place where the C++'s 0-based
 cell index becomes 1-based, so no further index shift appears anywhere in the
 evaluation loops.
 """
-@inline function bspline_cell(x::T, x0::T, h::T, n::Int) where {T<:AbstractFloat}
+@inline function bspline_cell(x::T, x0::T, h::T, n::Int) where {T<:Real}
     xi = (x - x0) / h
     i = clamp(trunc_floor(xi) + 1, 1, n - 1)
     return BsplineCell{T}(i, xi - T(i - 1))
 end
 
 """The four cubic B-spline basis functions at one local coordinate."""
-struct Basis4{T<:AbstractFloat}
+struct Basis4{T<:Real}
     b0::T
     b1::T
     b2::T
     b3::T
 end
 
-@inline function bspline_basis(t::T) where {T<:AbstractFloat}
+@inline function bspline_basis(t::T) where {T<:Real}
     t2 = t * t
     t3 = t2 * t
     omt = one(T) - t
@@ -123,7 +123,7 @@ end
     )
 end
 
-@inline function bspline_dbasis(t::T) where {T<:AbstractFloat}
+@inline function bspline_dbasis(t::T) where {T<:Real}
     t2 = t * t
     omt = one(T) - t
     return Basis4{T}(
@@ -134,7 +134,7 @@ end
     )
 end
 
-@inline function bspline_d2basis(t::T) where {T<:AbstractFloat}
+@inline function bspline_d2basis(t::T) where {T<:Real}
     return Basis4{T}(one(T) - t, T(3) * t - T(2), one(T) - T(3) * t, t)
 end
 
@@ -143,7 +143,7 @@ end
 
 Value and first two derivatives of a 1-D spline at `x`.
 """
-@inline function bspline_eval1(v::BsplineView1{T}, x::R) where {T,R<:AbstractFloat}
+@inline function bspline_eval1(v::BsplineView1{T}, x::R) where {T,R<:Real}
     cell = bspline_cell(R(x), R(v.x0), R(v.h), npoints(v))
     b = bspline_basis(cell.t)
     d1 = bspline_dbasis(cell.t)
@@ -172,7 +172,7 @@ Fixed cost: 64 coefficient reads and no data-dependent branches beyond the
 three per-axis index clamps. The x axis is contracted innermost because it is
 the fastest-varying one.
 """
-@inline function bspline_eval3(v::BsplineView3{T}, x::R, u::R, y::R) where {T,R<:AbstractFloat}
+@inline function bspline_eval3(v::BsplineView3{T}, x::R, u::R, y::R) where {T,R<:Real}
     cx = bspline_cell(x, R(v.x0), R(v.hx), npoints_x(v))
     cu = bspline_cell(u, R(v.u0), R(v.hu), npoints_u(v))
     cy = bspline_cell(y, R(v.y0), R(v.hy), npoints_y(v))

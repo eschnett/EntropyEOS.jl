@@ -16,7 +16,7 @@
 
 Conserved state, all components in κ-rescaled g/cm³.
 """
-struct Prim2ConOut{T<:AbstractFloat}
+struct Prim2ConOut{T<:Real}
     D::T
     τ::T
     D_Y::T

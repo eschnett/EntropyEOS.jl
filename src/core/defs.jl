@@ -86,14 +86,14 @@ best-effort state; nothing is deliberately NaN-poisoned.
 
 `log10` with C semantics: `-Inf` at zero, `NaN` below zero, never a throw.
 """
-@inline safe_log10(x::T) where {T<:AbstractFloat} = x < zero(T) ? T(NaN) : log10(x)
+@inline safe_log10(x::T) where {T<:Real} = x < zero(T) ? T(NaN) : log10(x)
 
 """
     safe_sqrt(x)
 
 `sqrt` with C semantics: `NaN` below zero, never a throw.
 """
-@inline safe_sqrt(x::T) where {T<:AbstractFloat} = x < zero(T) ? T(NaN) : sqrt(x)
+@inline safe_sqrt(x::T) where {T<:Real} = x < zero(T) ? T(NaN) : sqrt(x)
 
 """
     trunc_floor(x)
@@ -103,6 +103,12 @@ the result into a valid index range, so the value returned for a non-finite
 argument only has to be harmless, not meaningful.
 """
 @inline trunc_floor(x::AbstractFloat) = unsafe_trunc(Int, floor(x))
+
+# Generic fallback, reached by dual numbers under automatic differentiation.
+# Unlike the float path this is not total -- it throws on a non-finite argument
+# -- which is acceptable because AD is a host-side analysis tool, never a
+# kernel path, and a non-finite coordinate cannot be differentiated anyway.
+@inline trunc_floor(x::Real) = floor(Int, x)
 
 # ---------------------------------------------------------------------------
 # Numeric constants and tolerances
@@ -119,38 +125,42 @@ argument only has to be harmless, not meaningful.
 # ---------------------------------------------------------------------------
 
 """ln(10), to `Float64` precision, as the C++ `constexpr` is."""
-@inline ln10(::Type{T}) where {T<:AbstractFloat} =
+@inline ln10(::Type{T}) where {T<:Real} =
     T(2.302585092994045684017991454684364207601101488628772976033)
 
 """Convergence tolerance for `con2prim`'s two normalized residuals."""
 @inline con2prim_tol(::Type{Float64}) = 1.0e-12
 @inline con2prim_tol(::Type{T}) where {T<:AbstractFloat} = max(T(1.0e-12), T(64) * eps(T))
+@inline con2prim_tol(::Type{T}) where {T<:Real} = T(con2prim_tol(Float64))
 
 """Relative floor on τ in the energy residual's normalization."""
 @inline tau_floor_rel(::Type{Float64}) = 1.0e-16
 @inline tau_floor_rel(::Type{T}) where {T<:AbstractFloat} = max(T(1.0e-16), eps(T))
+@inline tau_floor_rel(::Type{T}) where {T<:Real} = T(tau_floor_rel(Float64))
 
 """Residual tolerance factor for the inner T-solve: `|g| <= tol * max(|s|, 1)`."""
 @inline tsolve_residual_tol(::Type{Float64}) = 1.0e-12
 @inline tsolve_residual_tol(::Type{T}) where {T<:AbstractFloat} = max(T(1.0e-12), T(64) * eps(T))
+@inline tsolve_residual_tol(::Type{T}) where {T<:Real} = T(tsolve_residual_tol(Float64))
 
 """Step tolerance factor for the inner T-solve: `|du| <= tol * max(|u|, 1)`."""
 @inline tsolve_step_tol(::Type{Float64}) = 1.0e-13
 @inline tsolve_step_tol(::Type{T}) where {T<:AbstractFloat} = max(T(1.0e-13), T(8) * eps(T))
+@inline tsolve_step_tol(::Type{T}) where {T<:Real} = T(tsolve_step_tol(Float64))
 
 """Rapidity a negative Newton step is reflected to, instead of exactly zero."""
-@inline tiny_w(::Type{T}) where {T<:AbstractFloat} = T(1.0e-10)
+@inline tiny_w(::Type{T}) where {T<:Real} = T(1.0e-10)
 
 """Bounds of the bracket scan's geometric ladder of relative offsets."""
-@inline scan_delta_min(::Type{T}) where {T<:AbstractFloat} = T(1.0e-5)
-@inline scan_delta_max(::Type{T}) where {T<:AbstractFloat} = T(0.6)
+@inline scan_delta_min(::Type{T}) where {T<:Real} = T(1.0e-5)
+@inline scan_delta_max(::Type{T}) where {T<:Real} = T(0.6)
 
 """
 Largest log excursion the low-density log-σ tail will accept before falling
 back to the plain linear tail. Returns `false` for NaN inputs by construction,
 which is intended.
 """
-@inline xlow_log_excursion_max(::Type{T}) where {T<:AbstractFloat} = T(40)
+@inline xlow_log_excursion_max(::Type{T}) where {T<:Real} = T(40)
 
 """
 Degeneracy guard for the perpendicular direction in `prim2con`.
@@ -161,10 +171,12 @@ that cannot represent it.
 """
 @inline perp_degenerate(::Type{Float64}) = 1.0e-300
 @inline perp_degenerate(::Type{T}) where {T<:AbstractFloat} = T(1.0e4) * floatmin(T)
+@inline perp_degenerate(::Type{T}) where {T<:Real} = T(perp_degenerate(Float64))
 
 """Guard against dividing by a vanishing velocity magnitude."""
 @inline tiny_denom(::Type{Float64}) = 1.0e-300
 @inline tiny_denom(::Type{T}) where {T<:AbstractFloat} = T(1.0e4) * floatmin(T)
+@inline tiny_denom(::Type{T}) where {T<:Real} = T(tiny_denom(Float64))
 
 """Upper bound on the bracket scan's candidate count; sizes its stack scratch."""
 const BRACKET_SCAN_MAX = 33

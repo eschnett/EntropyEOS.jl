@@ -27,7 +27,7 @@ of the physical entropy range at the atmosphere density, and NaN for `ye_atm`
 means preserve the incoming Yₑ. This must stay NaN rather than becoming
 `Union{Nothing,T}`, which would destroy isbits-ness and so the GPU path.
 """
-struct PolicyOptions{T<:AbstractFloat}
+struct PolicyOptions{T<:Real}
     ρ_atm::T
     s_atm::T
     ye_atm::T
@@ -66,7 +66,7 @@ end
 PolicyOptions(; kwargs...) = PolicyOptions{Float64}(; kwargs...)
 
 """A primitive state in the variables the policy layer clamps."""
-struct PrimState{T<:AbstractFloat}
+struct PrimState{T<:Real}
     ρ::T
     s::T
     ye::T
@@ -84,7 +84,7 @@ state.
 is the input conservatives bit-identically. `policy_flags`, not
 `base.result`, is the validity signal.
 """
-struct Con2PrimSafeOut{T<:AbstractFloat}
+struct Con2PrimSafeOut{T<:Real}
     base::Con2PrimOut{T}
     cons::Prim2ConOut{T}
     policy_flags::UInt32
