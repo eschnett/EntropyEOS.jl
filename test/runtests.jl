@@ -28,4 +28,5 @@ using StableRNGs
     include("test_state_policy.jl")
     include("test_device_api.jl")
     include("test_gpu.jl")
+    include("test_real_tables.jl")
 end
