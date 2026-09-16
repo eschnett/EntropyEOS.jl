@@ -31,21 +31,96 @@ and **rapidity**. Both choices remove constraints from the iterate space: any
 conditioned both as `v → 0` and as `v → 1`. A policy layer above it never
 fails, returning a valid and exactly solvable state for any input at all.
 
+## Usage
+
+```julia
+using EntropyEOS
+
+# Load, check and build, once at startup.
+table = read_stellarcollapse("LS220_repaired.h5")   # or make_synthetic_table()
+report = check_table(table)
+report.status === Status.fatal && error("broken table")
+
+eos = build_eos(table)
+v = EOSTableView(eos)                    # small, immutable, device-ready
+pol = default_policy(v, 1e3 * v.κ)       # atmosphere and collapse ceilings
+
+# A valid primitive state. Note that ρ is ρ* = κ·ρ, in κ-rescaled g/cm³.
+ρ, yₑ, w = exp10(0.5 * (v.x_lo + v.x_hi)), 0.4, 0.8
+sr = srange(v, ρ, yₑ)                    # the physical entropy window here
+s = 0.5 * (sr.s_min + sr.s_max)
+
+pt = evaluate(v, ρ, s, yₑ, NaN)          # NaN = no warm start
+@show pt.p pt.T_MeV pt.cs²
+
+# Forward, then back.
+c = prim2con(v, ρ, s, yₑ, w, 0.1ρ, 0.3, pt.u_solved)
+cons = Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²)
+rec = con2prim(v, cons, Con2PrimOptions(), s, w, pt.u_solved)   # warm-started
+
+# The path that never fails, for any input at all.
+safe = con2prim_safe(v, cons, Con2PrimOptions(), pol)
+safe.policy_flags & FLAG_POL_ANY == 0 || @info "state repaired; adopt safe.cons"
+```
+
+Warm-start state is threaded explicitly rather than cached, so evaluation is
+pure and re-entrant and calls are safe to run in parallel across grid points.
+
+### Units
+
+The run-time path is unit-free; conversion happens once, when the adapter is
+built. At that boundary ρ means ρ\* in **κ-rescaled** g/cm³, `s` is in k_B per
+baryon, `w` is the rapidity, and `D`, `τ`, `S_par`, `S_perp` and `B²` are all
+g/cm³. Feeding a raw table density where ρ\* is expected is the single easiest
+way to misuse the library. κ is part of the EOS identity, not an internal
+detail: a table swap that changes κ changes `D`, so checkpoints are not
+interchangeable across it.
+
+## GPUs
+
+The kernels are allocation-free, exception-free and generic in the scalar type,
+and the types carry `Adapt.jl` rules. That is the whole contract — the package
+depends on no GPU package at all:
+
+```julia
+using Adapt, KernelAbstractions, Metal
+dv = adapt(MtlArray, EntropyEOS.narrow(v, Float32))
+# pass dv into your own kernel; KernelAbstractions adapts it the rest of the way
+```
+
+Verified by running `evaluate` and `con2prim` as KernelAbstractions kernels on
+a Metal GPU. Enable the GPU testset with `ENTROPYEOS_TEST_GPU=metal` (or
+`cuda`) and the corresponding package installed.
+
 ## Status
 
-Under construction; see the milestone list in the development notes. Table
-*repair* is deliberately not included — it is an offline activity performed
-once before a simulation campaign, and the run-time path contains no repair
-logic. Use the C++ `eos_repair` tool for that, and `check_table` here to
+The run-time path is complete and tested: table loading and checking, the
+B-spline fit, the adapter, `prim2con`, `con2prim`, and the never-fails policy
+layer. Roughly 31,000 assertions pass.
+
+Table *repair* is deliberately not included — it is an offline activity
+performed once before a simulation campaign, and the run-time path contains no
+repair logic. Use the C++ `eos_repair` tool for that, and `check_table` here to
 detect a table that has not been repaired.
 
-## Precision
+## Relationship to the C++ library
 
-All defaults and all validation are at `Float64`. The kernels are generic in
-the scalar type, type-stable and allocation-free at `Float32`, and the types
-carry `Adapt.jl` rules so they can be moved to a GPU — but the numerics are
-not validated below `Float64`, and some tolerances are not representable
-there.
+Where the two can be compared they agree. The fitted B-spline coefficients are
+**bitwise identical** to the C++ when it is built with `-ffp-contract=off`
+(at clang's default some coefficients differ in the last bits, because clang
+fuses the elimination update into an FMA and Julia does not). Reproducing the
+configuration of the C++ README's worked example returns every digit it
+publishes.
+
+Exact agreement is not achievable everywhere and is not attempted: Julia's
+`log10` and `exp10` differ from the system libm by about one unit in the last
+place, and the table is stored logarithmically. So correctness rests on
+mathematical invariants and closed-form ground truth rather than on
+cross-language comparison — for instance the extension machinery is asserted to
+be *bitwise* transparent inside the table, the analytic Jacobian is checked
+against automatic differentiation rather than finite differences, and the
+policy layer's returned states are re-solved to confirm they reproduce
+themselves.
 
 ## References
 

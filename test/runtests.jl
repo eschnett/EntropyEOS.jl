@@ -8,6 +8,7 @@ using ForwardDiff
 using HDF5
 using LinearAlgebra
 using StaticArrays
+using Adapt
 using StableRNGs
 
 # Ordered by dependency, so the first failing testset is the lowest broken
@@ -25,4 +26,6 @@ using StableRNGs
     include("test_prim2con.jl")
     include("test_con2prim.jl")
     include("test_state_policy.jl")
+    include("test_device_api.jl")
+    include("test_gpu.jl")
 end
