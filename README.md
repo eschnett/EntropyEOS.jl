@@ -98,6 +98,13 @@ The run-time path is complete and tested: table loading and checking, the
 B-spline fit, the adapter, `prim2con`, `con2prim`, and the never-fails policy
 layer. Roughly 31,000 assertions pass.
 
+All five real tables are exercised end to end — LS220, the SRO LS220
+re-tabulation, DD2 (original and repaired) and SFHo — covering grids from
+234×136×50 to 391×163×66. Set `ENTROPYEOS_TABLE_DIR` to enable those tests;
+they add about two minutes. Building the adapter costs 15–40 s per table,
+dominated by the refined-grid scans that derive κ (the C++ threads these with
+OpenMP; this port does not yet).
+
 Table *repair* is deliberately not included — it is an offline activity
 performed once before a simulation campaign, and the run-time path contains no
 repair logic. Use the C++ `eos_repair` tool for that, and `check_table` here to
@@ -111,6 +118,24 @@ Where the two can be compared they agree. The fitted B-spline coefficients are
 fuses the elimination update into an FMA and Julia does not). Reproducing the
 configuration of the C++ README's worked example returns every digit it
 publishes.
+
+Statistically the two agree on real tables. Running both audits on the
+unrepaired LS220 with matched sampling and a 1e-3-perturbed warm start, over
+20,000 warm and 2,000 cold states:
+
+| | C++ | Julia |
+| --- | --- | --- |
+| warm Newton / fallback / failed | 19964 / 36 / 0 | 19958 / 42 / 0 |
+| cold failures | 1 | 1 |
+| density round trip, median | 1.89e-13 | 1.97e-13 |
+| p99 | 2.55e-09 | 2.43e-09 |
+| p99.9 | 1.03e-08 | 1.05e-08 |
+
+Both also reproduce the documented accept-and-guard outlier tail on DD2 — a
+handful of states per 20,000 where the round trip is poor. That is a property
+of the tables, and a port showing *none* of them would be sampling
+differently, not doing better. (On DD2 the C++'s own worst warm density error
+is 1.6; this port's is 0.18.)
 
 Exact agreement is not achievable everywhere and is not attempted: Julia's
 `log10` and `exp10` differ from the system libm by about one unit in the last
