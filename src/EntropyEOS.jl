@@ -68,7 +68,9 @@ export
     evaluate, eval_at, srange, srange_extended, sigma_extended, u_high_tail_info,
     # Solver
     Prim2ConOut, Con2PrimIn, Con2PrimOptions, Con2PrimOut, prim2con, con2prim,
-    PolicyOptions, PrimState, Con2PrimSafeOut,
+    PolicyOptions, PrimState, Con2PrimSafeOut, con2prim_safe,
+    default_policy, policy_derive_bounds, policy_atmosphere,
+    check_prim_state, project_prim_state, check_con_state,
     # Tables
     RawTable, validate_axes, add_field!, has_field, field, field_names,
     add_attribute!, has_attribute, attribute, attribute_names, energy_shift,
@@ -85,8 +87,5 @@ export
     read_stellarcollapse, check_table,
     # Units
     MEV_TO_ERG, K_B_ERG_PER_K, C_LIGHT_CM_S, M_AMU_G, M_NEUTRON_G, M_B_DEFAULT_G
-
-# Exported as each milestone lands: prim2con, con2prim, con2prim_safe,
-# default_policy, check_prim_state, project_prim_state, check_con_state.
 
 end # module EntropyEOS

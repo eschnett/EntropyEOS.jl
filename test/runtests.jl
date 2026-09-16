@@ -24,4 +24,5 @@ using StableRNGs
     include("test_adapter.jl")
     include("test_prim2con.jl")
     include("test_con2prim.jl")
+    include("test_state_policy.jl")
 end
