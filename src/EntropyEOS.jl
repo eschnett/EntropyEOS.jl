@@ -67,7 +67,7 @@ export
     EOSPoint, SRange, UHighTailInfo, EOSTableView, narrow,
     evaluate, eval_at, srange, srange_extended, sigma_extended, u_high_tail_info,
     # Solver
-    Prim2ConOut, Con2PrimIn, Con2PrimOptions, Con2PrimOut, prim2con,
+    Prim2ConOut, Con2PrimIn, Con2PrimOptions, Con2PrimOut, prim2con, con2prim,
     PolicyOptions, PrimState, Con2PrimSafeOut,
     # Tables
     RawTable, validate_axes, add_field!, has_field, field, field_names,
