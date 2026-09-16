@@ -100,10 +100,15 @@ layer. Roughly 31,000 assertions pass.
 
 All five real tables are exercised end to end — LS220, the SRO LS220
 re-tabulation, DD2 (original and repaired) and SFHo — covering grids from
-234×136×50 to 391×163×66. Set `ENTROPYEOS_TABLE_DIR` to enable those tests;
-they add about two minutes. Building the adapter costs 15–40 s per table,
-dominated by the refined-grid scans that derive κ (the C++ threads these with
-OpenMP; this port does not yet).
+234×136×50 to 391×163×66. Set `ENTROPYEOS_TABLE_DIR` to enable those tests.
+
+Building the adapter is dominated by the refined-grid scans that derive κ.
+Those are threaded over the Yₑ slices, so the cost falls with
+`JULIA_NUM_THREADS`: on twelve threads LS220 builds in 2.4 s and the 391×163×66
+SRO table in 7.9 s, against 15 s and 37 s serially. The partition is fixed
+rather than thread-dependent and the reduction is a minimum, so the result is
+bitwise identical whatever the thread count — which matters, because κ is part
+of the EOS identity.
 
 Table *repair* is deliberately not included — it is an offline activity
 performed once before a simulation campaign, and the run-time path contains no

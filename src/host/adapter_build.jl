@@ -129,6 +129,16 @@ function consider!(a::AuditAccum{T}, x, u, y, value) where {T}
     return a
 end
 
+"""Fold one accumulator into another, preserving the overall ten worst."""
+function merge_from!(dst::AuditAccum{T}, src::AuditAccum{T}) where {T}
+    dst.min_value = min(dst.min_value, src.min_value)
+    dst.violation_count += src.violation_count
+    for loc in src.worst
+        offer!(dst, loc)
+    end
+    return dst
+end
+
 function finalize_audit(a::AuditAccum{T}) where {T}
     return MonotonicityAudit{T}(a.min_value, a.violation_count, sort(a.worst; by=l -> l.value))
 end
@@ -177,29 +187,59 @@ end
 One pass over a refined grid spanning the physical box, tracking the minimum of
 `ε̂` for the κ floor and the monotonicity of both fields in `u`.
 """
+# The per-slice bodies are separate functions rather than inline loop bodies.
+# Inside `Threads.@threads` an inline body becomes a closure, and a scalar
+# accumulator assigned there can be boxed into the *enclosing* frame -- shared
+# by every thread, which both allocates per iteration and races. Hoisting the
+# work into a function makes the accumulators unambiguously thread-local.
+
+function scan_slice!(σ_acc::AuditAccum{T}, L_acc::AuditAccum{T}, σv::BsplineView3{T},
+                     Lv::BsplineView3{T}, y, x0, dx, rx, u0, du, ru, shift_hat, inv_c²) where {T}
+    ε_min = T(Inf)
+    for ju in 0:(ru - 1)
+        u = u0 + ju * du
+        for ix in 0:(rx - 1)
+            x = x0 + ix * dx
+            σ = bspline_eval3(σv, x, u, y)
+            L = bspline_eval3(Lv, x, u, y)
+            consider!(σ_acc, x, u, y, σ.fu)
+            consider!(L_acc, x, u, y, L.fu)
+            ε̂ = exp10(L.f) * inv_c² - shift_hat
+            ε̂ < ε_min && (ε_min = ε̂)
+        end
+    end
+    return ε_min
+end
+
 function scan_refined_grid(σv::BsplineView3{T}, Lv::BsplineView3{T}, x0, hx, nx, u0, hu, nu, y0, hy, ny,
                            refine, shift_hat, inv_c²) where {T}
     rx, ru, ry = (nx - 1) * refine + 1, (nu - 1) * refine + 1, (ny - 1) * refine + 1
     dx, du, dy = hx / refine, hu / refine, hy / refine
-    ε_min = T(Inf)
-    σ_acc = AuditAccum{T}()
-    L_acc = AuditAccum{T}()
-    for ky in 0:(ry - 1)
-        y = y0 + ky * dy
-        for ju in 0:(ru - 1)
-            u = u0 + ju * du
-            for ix in 0:(rx - 1)
-                x = x0 + ix * dx
-                σ = bspline_eval3(σv, x, u, y)
-                L = bspline_eval3(Lv, x, u, y)
-                consider!(σ_acc, x, u, y, σ.fu)
-                consider!(L_acc, x, u, y, L.fu)
-                ε̂ = exp10(L.f) * inv_c² - shift_hat
-                ε̂ < ε_min && (ε_min = ε̂)
-            end
-        end
+
+    # One accumulator per Yₑ slice, merged afterwards in slice order. The
+    # partition is fixed rather than thread-dependent, so the result is the same
+    # however many threads run it -- which matters because κ, derived from the
+    # minimum below, is part of the EOS identity.
+    ε_mins = fill(T(Inf), ry)
+    σ_accs = [AuditAccum{T}() for _ in 1:ry]
+    L_accs = [AuditAccum{T}() for _ in 1:ry]
+
+    Threads.@threads for ky in 0:(ry - 1)
+        @inbounds ε_mins[ky + 1] = scan_slice!(σ_accs[ky + 1], L_accs[ky + 1], σv, Lv, y0 + ky * dy,
+                                               x0, dx, rx, u0, du, ru, shift_hat, inv_c²)
     end
-    return ε_min, AdapterAudit{T}(finalize_audit(σ_acc), finalize_audit(L_acc))
+
+    # Reduce with the same `<` test the inner loop uses, so a NaN never
+    # displaces a real minimum; `min` would propagate it instead.
+    ε_min = T(Inf)
+    σ_total = AuditAccum{T}()
+    L_total = AuditAccum{T}()
+    for k in 1:ry
+        @inbounds ε_mins[k] < ε_min && (ε_min = ε_mins[k])
+        merge_from!(σ_total, @inbounds σ_accs[k])
+        merge_from!(L_total, @inbounds L_accs[k])
+    end
+    return ε_min, AdapterAudit{T}(finalize_audit(σ_total), finalize_audit(L_total))
 end
 
 """
@@ -212,9 +252,34 @@ actually land. It is safe to run before κ is known, because κ only relabels th
 density origin and the causal clamp depends on `ε̂` and the entropy growth rate
 alone.
 """
+function ext_scan_slice(Lv::BsplineView3{T}, σv::BsplineView3{T}, y, x_ext_lo, dx, rx, u_ext_lo, du, ru,
+                        x_lo, x_hi, u_lo, u_hi, slope_floor_σ, slope_floor_L, cs²_ext_cap, shift_hat,
+                        inv_c²) where {T}
+    ε_min = T(Inf)
+    for ju in 0:(ru - 1)
+        u = u_ext_lo + ju * du
+        u_above = u > u_hi
+        for ix in 0:(rx - 1)
+            x = x_ext_lo + ix * dx
+            b_cap = zero(T)
+            if u_above
+                α = σ_u_high_alpha(σv, clamp(x, x_lo, x_hi), u_hi, y, slope_floor_σ)
+                α > 0 && (b_cap = (one(T) + cs²_ext_cap) * α)
+            end
+            # This scan evaluates L, whose tails are never log-space ones.
+            spec = ExtSpec{T}(x_lo, x_hi, u_lo, u_hi, x_ext_lo, slope_floor_L, false, false, b_cap,
+                              shift_hat, inv_c²)
+            L = extended_sample(Lv, x, u, y, spec)
+            ε̂ = exp10(L.f) * inv_c² - shift_hat
+            ε̂ < ε_min && (ε_min = ε̂)
+        end
+    end
+    return ε_min
+end
+
 function scan_extended_eps_floor(Lv::BsplineView3{T}, σv::BsplineView3{T}, x0, hx, nx, u0, hu, nu, y0, hy,
-                                 ny, refine, ext_cells, slope_floor_σ, slope_floor_L, cs²_ext_cap,
-                                 shift_hat, inv_c²) where {T}
+                                ny, refine, ext_cells, slope_floor_σ, slope_floor_L, cs²_ext_cap,
+                                shift_hat, inv_c²) where {T}
     x_lo, x_hi = x0, x0 + (nx - 1) * hx
     u_lo, u_hi = u0, u0 + (nu - 1) * hu
     x_ext_lo = x_lo - ext_cells * hx
@@ -225,27 +290,18 @@ function scan_extended_eps_floor(Lv::BsplineView3{T}, σv::BsplineView3{T}, x0, 
     ry = (ny - 1) * refine + 1
     dx, du, dy = hx / refine, hu / refine, hy / refine
 
+    # A pure minimum reduction over a fixed partition, so the threaded result is
+    # bit-identical to the serial one.
+    ε_mins = fill(T(Inf), ry)
+    Threads.@threads for ky in 0:(ry - 1)
+        @inbounds ε_mins[ky + 1] = ext_scan_slice(Lv, σv, y0 + ky * dy, x_ext_lo, dx, rx, u_ext_lo, du,
+                                                  ru, x_lo, x_hi, u_lo, u_hi, slope_floor_σ,
+                                                  slope_floor_L, cs²_ext_cap, shift_hat, inv_c²)
+    end
+
     ε_min = T(Inf)
-    for ky in 0:(ry - 1)
-        y = y0 + ky * dy
-        for ju in 0:(ru - 1)
-            u = u_ext_lo + ju * du
-            u_above = u > u_hi
-            for ix in 0:(rx - 1)
-                x = x_ext_lo + ix * dx
-                b_cap = zero(T)
-                if u_above
-                    α = σ_u_high_alpha(σv, clamp(x, x_lo, x_hi), u_hi, y, slope_floor_σ)
-                    α > 0 && (b_cap = (one(T) + cs²_ext_cap) * α)
-                end
-                # This scan evaluates L, whose tails are never log-space ones.
-                spec = ExtSpec{T}(x_lo, x_hi, u_lo, u_hi, x_ext_lo, slope_floor_L, false, false, b_cap,
-                                  shift_hat, inv_c²)
-                L = extended_sample(Lv, x, u, y, spec)
-                ε̂ = exp10(L.f) * inv_c² - shift_hat
-                ε̂ < ε_min && (ε_min = ε̂)
-            end
-        end
+    for k in 1:ry
+        @inbounds ε_mins[k] < ε_min && (ε_min = ε_mins[k])
     end
     return ε_min
 end

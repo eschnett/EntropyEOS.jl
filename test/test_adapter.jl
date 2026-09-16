@@ -50,6 +50,32 @@ end
         @test v.u_ext_lo < v.u_lo && v.u_ext_hi > v.u_hi
     end
 
+    @testset "threaded scans are deterministic" begin
+        # The refined-grid scans that derive κ run one Yₑ slice per thread. κ is
+        # part of the EOS identity -- a table swap that changes it changes D, so
+        # checkpoints are not interchangeable across it -- which makes a racy or
+        # thread-count-dependent reduction a correctness bug, not a performance
+        # one. Rebuilding must give bitwise identical results.
+        #
+        # An earlier version inlined the slice body in the `@threads` loop; the
+        # scalar minimum was boxed into the enclosing frame and shared between
+        # threads, which shifted κ by ~6e-8 between thread counts. Hoisting the
+        # body into a function fixed it. This test is what would catch that
+        # coming back, and it only bites when the runner has threads, so CI sets
+        # them (see .github/workflows/CI.yml).
+        a = E.build_eos(tbl)
+        b = E.build_eos(tbl)
+        @test EOSTableView(a).κ === EOSTableView(b).κ
+        @test a.audit.σ_u.min_value === b.audit.σ_u.min_value
+        @test a.audit.L_u.min_value === b.audit.L_u.min_value
+        @test a.audit.σ_u.violation_count == b.audit.σ_u.violation_count
+        @test a.audit.L_u.violation_count == b.audit.L_u.violation_count
+        @test [l.value for l in a.audit.σ_u.worst] == [l.value for l in b.audit.σ_u.worst]
+        @test [l.value for l in a.audit.L_u.worst] == [l.value for l in b.audit.L_u.worst]
+        # And identical to the view built once at the top of this file.
+        @test EOSTableView(a).κ === v.κ
+    end
+
     @testset "build validation" begin
         short = RawTable(collect(1.0:3.0), collect(0.0:0.5:1.5), collect(0.1:0.1:0.4))
         add_field!(short, "entropy", zeros(3, 4, 4))
