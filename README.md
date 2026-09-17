@@ -2,8 +2,9 @@
 
 * [![Documentation](https://img.shields.io/badge/Docs-Dev-blue.svg)](https://eschnett.github.io/EntropyEOS.jl/dev/)
 * [![GitHub CI](https://github.com/eschnett/EntropyEOS.jl/workflows/CI/badge.svg)](https://github.com/eschnett/EntropyEOS.jl/actions)
+* [![codecov](https://codecov.io/gh/eschnett/EntropyEOS.jl/graph/badge.svg?token=2Z29OBMVB6)](https://codecov.io/gh/eschnett/EntropyEOS.jl)
 
-Tabulated equations of state for general-relativistic hydrodynamics.
+Handling tabulated equations of state for general-relativistic hydrodynamics.
 
 This is a Julia translation of the C++ library
 [EntropyEOS](https://github.com/eschnett/EntropyEOS), covering the run-time
