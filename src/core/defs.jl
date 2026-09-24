@@ -89,6 +89,13 @@ best-effort state; nothing is deliberately NaN-poisoned.
 @inline safe_log10(x::T) where {T<:Real} = x < zero(T) ? T(NaN) : log10(x)
 
 """
+    safe_log(x)
+
+`log` with C semantics: `-Inf` at zero, `NaN` below zero, never a throw.
+"""
+@inline safe_log(x::T) where {T<:Real} = x < zero(T) ? T(NaN) : log(x)
+
+"""
     safe_sqrt(x)
 
 `sqrt` with C semantics: `NaN` below zero, never a throw.

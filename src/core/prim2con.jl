@@ -36,7 +36,7 @@ and perpendicular velocities then reduce to direction-independent values.
 
 This direction is closed form and cannot fail.
 """
-function prim2con(eos::EOSTableView{S}, ρ::T, s::T, yₑ::T, w::T, B²::T, cos_vB::T,
+function prim2con(eos::AbstractEOS{S}, ρ::T, s::T, yₑ::T, w::T, B²::T, cos_vB::T,
                   u_guess::T=T(NaN)) where {S,T}
     pt = evaluate(eos, ρ, s, yₑ, u_guess)
 
@@ -70,7 +70,7 @@ function prim2con(eos::EOSTableView{S}, ρ::T, s::T, yₑ::T, w::T, B²::T, cos_
     return Prim2ConOut{T}(D, τ, D_Y, S_par, S_perp, B²)
 end
 
-prim2con(eos::EOSTableView{S}, ρ, s, yₑ, w, B², cos_vB, u_guess=NaN) where {S} =
+prim2con(eos::AbstractEOS{S}, ρ, s, yₑ, w, B², cos_vB, u_guess=NaN) where {S} =
     prim2con(eos, promote(float(ρ), float(s), float(yₑ), float(w), float(B²), float(cos_vB),
                           float(u_guess))...)
 
@@ -84,7 +84,7 @@ momentum 3-vector.
 is carried by the rapidity `w`, not by `v_dir`. Reducing a general metric to the
 parallel and perpendicular projections is the caller's job.
 """
-function prim2con(eos::EOSTableView{S}, ρ::T, s::T, yₑ::T, w::T, v_dir::SVector{3,T},
+function prim2con(eos::AbstractEOS{S}, ρ::T, s::T, yₑ::T, w::T, v_dir::SVector{3,T},
                   B::SVector{3,T}, u_guess::T=T(NaN)) where {S,T}
     B² = B[1] * B[1] + B[2] * B[2] + B[3] * B[3]
     Bmag = safe_sqrt(B²)

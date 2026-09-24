@@ -29,9 +29,11 @@ original. Both halves live in one flat module; submodules would complicate
 ```
 src/core/            kernel-side: allocation-free, exception-free, generic in T
   defs.jl            flag bits, outcome enums, domain-safe math, per-type tolerances
+  eos_interface.jl   AbstractEOS, its contract, and the EOSPoint/SRange results
   bspline_eval.jl    uniform cubic B-spline evaluation, value and derivatives
   adapter_eval.jl    the designed domain extensions, then evaluate() and srange()
   adapt.jl           Adapt rules and explicit scalar-type narrowing
+  analytic_eos.jl    IdealGasEOS and HybridEOS: closed-form potentials
   prim2con.jl        primitives to conserved, closed form
   con2prim.jl        conserved to primitives: Newton, cold seed, bracket scan, fallback
   state_policy.jl    the never-fails layer
@@ -42,6 +44,7 @@ src/host/            owns memory, may throw, never needed on a device
   adapter_build.jl   validate, fit, derive κ, audit monotonicity
   check.jl           table diagnostics
   synthetic.jl       an analytic ideal gas, and deliberate defect injectors
+  analytic_eos.jl    the analytic EOSs' validating constructors and GPP constants
   io_stellarcollapse.jl   the stellarcollapse HDF5 reader (read side only)
 src/precompile.jl    PrecompileTools workload over the whole public Float64 path
 ```
@@ -88,7 +91,27 @@ why kernel-side result types are constrained to `Real` rather than
 `AbstractFloat` (`ForwardDiff.Dual` is `Real` but not `AbstractFloat`). Storage
 types keep `AbstractFloat`, since that is an array element type.
 
-**The isbits boundary is one function**, `EOSTableView(::EOSTable)`. Everything
+**The EOS interface.** `prim2con`, `con2prim` and the state policy take any
+`AbstractEOS`. They reach it only through `evaluate`, `srange`,
+`srange_extended`, `logρ_bounds` and `yₑ_bounds`, and every method is typed on
+the abstract type. The contract is stated once, in `core/eos_interface.jl`.
+Introducing it changed no arithmetic: a hash over 3,000 states of every entry
+point's output was bitwise unchanged. `EntropyEOS.κ` is part of the interface but
+is not exported, since `κ` is too common a name to take from a caller.
+
+**The analytic EOSs** have no C++ counterpart. `IdealGasEOS` is a Γ-law gas,
+and `HybridEOS` is the generalized piecewise polytrope of O'Boyle et al. (2020)
+plus a thermal Γ-law. The generalized form was chosen over the classic one
+(Read et al. 2009) because it makes `dp/dρ` continuous as well as `p` and `ε`.
+The classic form's jumps in `cs²` would put jumps into con2prim's Jacobian, which
+the table path is C² precisely to avoid. Both EOSs are closed-form, so
+`evaluate` neither clamps nor iterates; the box only sets flags. The terms are
+written as one `exp` of a sum of logs, and each polytropic piece is scaled to a
+reference density, so that cgs parameters (`ρ^Γ ~ 1e45`) do not overflow
+`Float32` intermediates. Validation, including a causality check over the box,
+happens once in the host constructors, so the kernels never throw.
+
+**The isbits boundary for tables is one function**, `EOSTableView(::EOSTable)`. Everything
 in `core/` is kernel-side; everything in `host/` is not.
 `EOSTableView{T,Array{T,3}}` is deliberately *not* isbits — it holds a heap
 array — and becomes isbits once `Adapt` has moved it to a device array type.
@@ -192,7 +215,18 @@ no reference implementation, in this order:
 3. **Closed-form ground truth**, the analytic ideal gas in `synthetic.jl`. It is
    shipped in `src/` rather than `test/` because it is the only way to get a
    table without a several-hundred-megabyte file — useful to a downstream hydro
-   code's own tests, and the reason the C++ ships its equivalent too.
+   code's own tests, and the reason the C++ ships its equivalent too. The
+   analytic EOSs are checked the same way:
+   - against ForwardDiff;
+   - by the generalized polytrope's continuity at every break, to 1e-13;
+   - by reproducing the paper's published SLy crust constants;
+   - and through a test-only `ToyEOS` that implements nothing but the interface
+     contract and runs the whole solver.
+
+   Their round trips are asserted *per condition number*: ρ scaled by `hW²`,
+   and `s` by the fraction of τ and of U that entropy controls. When `U ≪ 1`,
+   or on the hybrid's cold end, the entropy is physically ill-determined, and a
+   flat 1e-12 bound would be either false or vacuous.
 4. **Statistical agreement on real tables**, gated behind `ENTROPYEOS_TABLE_DIR`.
 
 Gating is by environment variable so CI needs nothing: `ENTROPYEOS_TABLE_DIR`

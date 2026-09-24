@@ -179,7 +179,7 @@ Evaluate both residuals and the analytic Jacobian at one trial `(s, w)`.
 `u_prev` threads the EOS temperature solve's warm start between calls, which is
 what makes the whole iteration cheap.
 """
-function residuals(eos::EOSTableView{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, s::T, w::T,
+function residuals(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, s::T, w::T,
                    u_prev::T, τ_floor_rel::T) where {S,T}
     coshw = cosh(w)
     sinhw = sinh(w)
@@ -241,7 +241,7 @@ end
 
 # Promoting fallback, so a caller may differentiate with respect to one
 # argument while the rest stay plain floats.
-residuals(eos::EOSTableView{S}, D, τ, yₑ, S_par, S_perp, B², s, w, u_prev, τ_floor_rel) where {S} =
+residuals(eos::AbstractEOS{S}, D, τ, yₑ, S_par, S_perp, B², s, w, u_prev, τ_floor_rel) where {S} =
     residuals(eos, promote(D, τ, yₑ, S_par, S_perp, B², s, w, u_prev, τ_floor_rel)...)
 
 """
@@ -255,7 +255,7 @@ increasing in rapidity, negative at rest and unbounded above, so a bracketed
 safeguarded Newton cannot fail. That proof is the reason the formulation uses
 rapidity in the first place.
 """
-function inner_solve_w(eos::EOSTableView{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, s::T,
+function inner_solve_w(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, s::T,
                        w_max::T, τ_floor_rel::T, w_start::T, u_prev::T, max_iter_1d::Integer,
                        tol::T) where {S,T}
     lo = zero(T)
@@ -333,7 +333,7 @@ manufacture a false bracket that masks the real one.
 `nmax` sizes the stack scratch. It is a `Val` so a GPU caller can shrink the
 per-thread local memory without touching the algorithm.
 """
-function bracket_scan(eos::EOSTableView{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, w_max::T,
+function bracket_scan(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, w_max::T,
                       τ_floor_rel::T, n_scan::Integer, s_in::T, w_in::T, w_seed0::T, u_seed0::T,
                       max_iter_1d::Integer, tol::T, ::Val{NMAX}=Val(BRACKET_SCAN_MAX)) where {S,T,NMAX}
     n = clamp(Int(n_scan), 4, NMAX)
@@ -466,7 +466,7 @@ This cannot fail: `U_s = T̂ > 0` everywhere, which is precisely what the tails'
 monotonicity guards buy, so the extended entropy window always brackets the
 root and the safeguarded Newton is globally convergent.
 """
-function seed_s_solve(eos::EOSTableView{S}, ρ::T, yₑ::T, ε::T, u_prev::T, n_iter::Integer) where {S,T}
+function seed_s_solve(eos::AbstractEOS{S}, ρ::T, yₑ::T, ε::T, u_prev::T, n_iter::Integer) where {S,T}
     ext = srange_extended(eos, ρ, yₑ)
     lo, hi = ext.s_min, ext.s_max
     # A degenerate bracket is never seen on a real table, but is guarded.
@@ -567,7 +567,7 @@ rapidity, the energy identity gives the internal energy, and the guaranteed
 monotone entropy solve gives the entropy. Being field-aware is what makes this
 work on magnetized states, where a hydrodynamic seed is badly wrong.
 """
-function cold_seed(eos::EOSTableView{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, w_max::T,
+function cold_seed(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, w_max::T,
                    n_pass::Integer, n_s_iter::Integer) where {S,T}
     E = τ + D
     S_perp_pos = S_perp > zero(T) ? S_perp : zero(T)
@@ -645,7 +645,7 @@ fallback is the safety net for the remainder.
 
 A failure still returns a fully populated best-effort state.
 """
-function con2prim(eos::EOSTableView{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T}, s_guess::T=T(NaN),
+function con2prim(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T}, s_guess::T=T(NaN),
                   w_guess::T=T(NaN), u_guess::T=T(NaN)) where {S,T}
     yₑ = in.D_Y / in.D
 
@@ -865,7 +865,7 @@ function con2prim(eos::EOSTableView{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions
     return fill_out(r_cur, yₑ, result, iters, outer_iters)
 end
 
-con2prim(eos::EOSTableView{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{P}, args...) where {S,T,P} =
+con2prim(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{P}, args...) where {S,T,P} =
     con2prim(eos, in, Con2PrimOptions{T}(; tol=T(opts.tol), max_iter_newton=opts.max_iter_newton,
                                          max_iter_1d=opts.max_iter_1d, w_max=T(opts.w_max),
                                          τ_floor_rel=T(opts.τ_floor_rel), bracket_scan=opts.bracket_scan,

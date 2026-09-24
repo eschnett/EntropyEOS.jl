@@ -98,12 +98,12 @@ end
 # default. Written as positive tests so a NaN falls through to the default.
 # ---------------------------------------------------------------------------
 
-@inline function pol_ρ_ceiling(eos::EOSTableView{S}, pol::PolicyOptions{T}) where {S,T}
-    return (isfinite(pol.ρ_ceiling) && pol.ρ_ceiling > zero(T)) ? pol.ρ_ceiling : exp10(T(eos.x_hi))
+@inline function pol_ρ_ceiling(eos::AbstractEOS{S}, pol::PolicyOptions{T}) where {S,T}
+    return (isfinite(pol.ρ_ceiling) && pol.ρ_ceiling > zero(T)) ? pol.ρ_ceiling : exp10(T(last(logρ_bounds(eos))))
 end
 
-@inline function pol_ρ_atm(eos::EOSTableView{S}, pol::PolicyOptions{T}) where {S,T}
-    lo = (isfinite(pol.ρ_atm) && pol.ρ_atm > zero(T)) ? pol.ρ_atm : exp10(T(eos.x_lo))
+@inline function pol_ρ_atm(eos::AbstractEOS{S}, pol::PolicyOptions{T}) where {S,T}
+    lo = (isfinite(pol.ρ_atm) && pol.ρ_atm > zero(T)) ? pol.ρ_atm : exp10(T(first(logρ_bounds(eos))))
     hi = pol_ρ_ceiling(eos, pol)
     return lo > hi ? hi : lo
 end
@@ -116,11 +116,12 @@ end
     return (isfinite(pol.atm_trigger) && pol.atm_trigger > zero(T)) ? pol.atm_trigger : one(T)
 end
 
-@inline function pol_ye(eos::EOSTableView{S}, pol::PolicyOptions{T}, ye_in) where {S,T}
+@inline function pol_ye(eos::AbstractEOS{S}, pol::PolicyOptions{T}, ye_in) where {S,T}
+    y_lo, y_hi = yₑ_bounds(eos)
     y = pol.ye_atm
     isfinite(y) || (y = T(ye_in))
-    isfinite(y) || (y = T(0.5) * (T(eos.y_lo) + T(eos.y_hi)))
-    return clamp(y, T(eos.y_lo), T(eos.y_hi))
+    isfinite(y) || (y = T(0.5) * (T(y_lo) + T(y_hi)))
+    return clamp(y, T(y_lo), T(y_hi))
 end
 
 # ---------------------------------------------------------------------------
@@ -137,20 +138,22 @@ is found by scanning a small grid in density and electron fraction at the
 hottest state, because `ρh` is not monotone on a real table -- taking the
 corner alone would underestimate it.
 """
-function policy_derive_bounds(eos::EOSTableView{S}, pol::PolicyOptions{T}) where {S,T}
+function policy_derive_bounds(eos::AbstractEOS{S}, pol::PolicyOptions{T}) where {S,T}
     w_cap = pol_w_cap(pol)
     W_cap = cosh(w_cap)
     ρ_ceiling = pol_ρ_ceiling(eos, pol)
     D_max = ρ_ceiling * W_cap
 
+    x_lo, x_hi = logρ_bounds(eos)
+    y_lo, y_hi = yₑ_bounds(eos)
     nx, ny = 5, 3
     max_ρh = zero(T)
     for i in 0:(nx - 1)
         fx = T(i) / T(nx - 1)
-        ρ = exp10(T(eos.x_lo) + fx * (T(eos.x_hi) - T(eos.x_lo)))
+        ρ = exp10(T(x_lo) + fx * (T(x_hi) - T(x_lo)))
         for j in 0:(ny - 1)
             fy = T(j) / T(ny - 1)
-            yₑ = T(eos.y_lo) + fy * (T(eos.y_hi) - T(eos.y_lo))
+            yₑ = T(y_lo) + fy * (T(y_hi) - T(y_lo))
             sr = srange(eos, ρ, yₑ)
             pt = evaluate(eos, ρ, sr.s_max, yₑ, T(NaN))
             ρh = ρ * pt.h
@@ -172,9 +175,9 @@ Everything but the atmosphere density derived from the table itself.
 The rapidity cap corresponds to a Lorentz factor of 100, which must stay well
 below the solver's own `w_max` or the cap is silently inoperative.
 """
-function default_policy(eos::EOSTableView{S}, ρ_atm::T) where {S,T}
+function default_policy(eos::AbstractEOS{S}, ρ_atm::T) where {S,T}
     pol = PolicyOptions{T}(; ρ_atm=ρ_atm, s_atm=T(NaN), ye_atm=T(NaN), atm_trigger=T(1.01),
-                           ρ_ceiling=exp10(T(eos.x_hi)), w_cap=acosh(T(100)),
+                           ρ_ceiling=exp10(T(last(logρ_bounds(eos)))), w_cap=acosh(T(100)),
                            collapse_to_atmosphere=false)
     return policy_derive_bounds(eos, pol)
 end
@@ -185,7 +188,7 @@ end
 The atmosphere state: at rest, at the floor density, at the midpoint of the
 physical entropy window unless the policy pins it.
 """
-function policy_atmosphere(eos::EOSTableView{S}, pol::PolicyOptions{T}, ye_in) where {S,T}
+function policy_atmosphere(eos::AbstractEOS{S}, pol::PolicyOptions{T}, ye_in) where {S,T}
     ρ = pol_ρ_atm(eos, pol)
     yₑ = pol_ye(eos, pol, ye_in)
     sr = srange(eos, ρ, yₑ)
@@ -210,7 +213,7 @@ though the solver can represent it.
 
 Exactly one entropy-window lookup on every path, and no solves.
 """
-function pol_project_core(eos::EOSTableView{S}, pol::PolicyOptions{T}, in::PrimState{T}) where {S,T}
+function pol_project_core(eos::AbstractEOS{S}, pol::PolicyOptions{T}, in::PrimState{T}) where {S,T}
     if !(isfinite(in.ρ) && isfinite(in.s) && isfinite(in.ye) && isfinite(in.w))
         return policy_atmosphere(eos, pol, in.ye), FLAG_POL_NONFINITE | FLAG_POL_ATMOSPHERE
     end
@@ -228,11 +231,12 @@ function pol_project_core(eos::EOSTableView{S}, pol::PolicyOptions{T}, in::PrimS
         ρ = ρ_hi
         flags |= FLAG_POL_ρ_CLAMPED
     end
-    if yₑ < eos.y_lo
-        yₑ = T(eos.y_lo)
+    y_lo, y_hi = yₑ_bounds(eos)
+    if yₑ < y_lo
+        yₑ = T(y_lo)
         flags |= FLAG_POL_YE_CLAMPED
-    elseif yₑ > eos.y_hi
-        yₑ = T(eos.y_hi)
+    elseif yₑ > y_hi
+        yₑ = T(y_hi)
         flags |= FLAG_POL_YE_CLAMPED
     end
 
@@ -263,7 +267,7 @@ end
 What a projection *would* change, without changing anything. No solves, so this
 is cheap enough to run at every point of every timestep.
 """
-@inline function check_prim_state(eos::EOSTableView{S}, ps::PrimState{T}, pol::PolicyOptions{T}) where {S,T}
+@inline function check_prim_state(eos::AbstractEOS{S}, ps::PrimState{T}, pol::PolicyOptions{T}) where {S,T}
     return pol_project_core(eos, pol, ps)[2]
 end
 
@@ -272,7 +276,7 @@ end
 
 Clamp into validity, reporting what changed. Idempotent.
 """
-@inline function project_prim_state(eos::EOSTableView{S}, ps::PrimState{T},
+@inline function project_prim_state(eos::AbstractEOS{S}, ps::PrimState{T},
                                     pol::PolicyOptions{T}) where {S,T}
     return pol_project_core(eos, pol, ps)
 end
@@ -294,7 +298,7 @@ than by hope.
 The field direction is recovered from the incoming momentum, so the repaired
 state keeps pointing the way the original did.
 """
-function pol_package(eos::EOSTableView{S}, ps::PrimState{T}, S_par::T, S_perp::T, B²::T,
+function pol_package(eos::AbstractEOS{S}, ps::PrimState{T}, S_par::T, S_perp::T, B²::T,
                      u_guess::T) where {S,T}
     pt = evaluate(eos, ps.ρ, ps.s, ps.ye, u_guess)
     W = cosh(ps.w)
@@ -325,7 +329,7 @@ end
 Handle a state past the collapse ceiling, by excising to atmosphere or by
 projecting onto the ceiling primitives.
 """
-function pol_collapse(eos::EOSTableView{S}, pol::PolicyOptions{T}, in::Con2PrimIn{T}, ye_in::T,
+function pol_collapse(eos::AbstractEOS{S}, pol::PolicyOptions{T}, in::Con2PrimIn{T}, ye_in::T,
                       B²::T) where {S,T}
     if pol.collapse_to_atmosphere
         ps = policy_atmosphere(eos, pol, ye_in)
@@ -377,7 +381,7 @@ enough to run at every point of every timestep. With `check_endpoints` it also
 solves at the two ends of the entropy window, which detects a state whose energy
 lies outside anything the table can express.
 """
-function check_con_state(eos::EOSTableView{S}, in::Con2PrimIn{T}, pol::PolicyOptions{T};
+function check_con_state(eos::AbstractEOS{S}, in::Con2PrimIn{T}, pol::PolicyOptions{T};
                          check_endpoints::Bool=false, solver::Con2PrimOptions{T}=Con2PrimOptions{T}()) where {S,T}
     fin = isfinite(in.D) && isfinite(in.τ) && isfinite(in.D_Y) && isfinite(in.S_par) &&
           isfinite(in.S_perp) && isfinite(in.B²)
@@ -396,7 +400,8 @@ function check_con_state(eos::EOSTableView{S}, in::Con2PrimIn{T}, pol::PolicyOpt
 
     (flags != 0 || !check_endpoints) && return flags
 
-    yₑ = clamp(in.D_Y / in.D, T(eos.y_lo), T(eos.y_hi))
+    y_lo, y_hi = yₑ_bounds(eos)
+    yₑ = clamp(in.D_Y / in.D, T(y_lo), T(y_hi))
     sr_a = srange(eos, in.D, yₑ)
     sr_b = srange(eos, in.D / cosh(solver.w_max), yₑ)
     s_lo = min(sr_a.s_min, sr_b.s_min)
@@ -437,7 +442,7 @@ Physics fidelity is explicitly not the goal in the excision regime. The point is
 to keep the evolution running with a state that is valid, however bad the
 physics has become.
 """
-function con2prim_safe(eos::EOSTableView{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T},
+function con2prim_safe(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T},
                        pol::PolicyOptions{T}, s_guess::T=T(NaN), w_guess::T=T(NaN),
                        u_guess::T=T(NaN)) where {S,T}
     B² = (isfinite(in.B²) && in.B² > zero(T)) ? in.B² : zero(T)
@@ -499,7 +504,8 @@ function con2prim_safe(eos::EOSTableView{S}, in::Con2PrimIn{T}, opts::Con2PrimOp
 
     # 4. The solve failed: diagnose with the outer function's own endpoints.
     w_ref = isfinite(base.w) ? clamp(base.w, zero(T), opts.w_max) : zero(T)
-    ye_c = clamp(ye_in, T(eos.y_lo), T(eos.y_hi))
+    y_lo, y_hi = yₑ_bounds(eos)
+    ye_c = clamp(ye_in, T(y_lo), T(y_hi))
     ρ_ref = in.D / cosh(w_ref)
     sr_ref = srange(eos, ρ_ref, ye_c)
 
