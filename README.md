@@ -10,6 +10,8 @@ This is a Julia translation of the C++ library
 [EntropyEOS](https://github.com/eschnett/EntropyEOS), covering the run-time
 path a hydro code actually calls: loading a table, checking it, and using it.
 
+[CODE.md](CODE.md) describes how the package is built and why.
+
 ## What it does
 
 Real EOS tables store a bundle of columns `F(ρ, T, Yₑ)` on a rectangular grid.
