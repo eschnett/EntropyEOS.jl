@@ -119,5 +119,39 @@ else
                 @test rel < sqrt(eps(T)) * 100
             end
         end
+
+        # The analytic EOSs are isbits, so they go into a kernel as they are.
+        @testset "GPU ($GPU_BACKEND, $T, $(nameof(typeof(eos))))" for T in GPU_ELTYPES,
+            eos in (IdealGasEOS{T}(; Γ=2.0, K_ref=100.0, s_ref=5.0, s_window=(1.0, 8.0), ρ_bounds=(1e-10, 1e-2),
+                                   yₑ_bounds=(0.0, 1.0)),
+                    HybridEOS{T}(; ρ_breaks=(1e-4,), K₀=100.0, Γs=(2.0, 2.5), Γ_th=5 / 3, K_th_ref=1.0, s_ref=0.0,
+                                 s_window=(1.0, 5.0), ρ_bounds=(1e-10, 1e-3), yₑ_bounds=(0.0, 1.0)))
+            n = 1024
+            x_lo, x_hi = logρ_bounds(eos)
+            ρs = T[exp10(x) for x in range(T(x_lo) + one(T), T(x_hi) - one(T); length=n)]
+            ss = fill(T(3), n)
+            yₑ = T(0.5)
+            D = T[]; τ = T[]; DY = T[]; Sp = T[]; Sq = T[]; B2 = T[]
+            for (k, ρ) in enumerate(ρs)
+                c = prim2con(eos, ρ, ss[k], yₑ, T(0.1 + 1.5k / n), zero(T), zero(T), T(NaN))
+                push!(D, c.D); push!(τ, c.τ); push!(DY, c.D_Y)
+                push!(Sp, c.S_par); push!(Sq, c.S_perp); push!(B2, c.B²)
+            end
+            opts = Con2PrimOptions{T}()
+
+            dout = DEVARRAY(zeros(T, n))
+            _gpu_eval!(BACKEND, 64)(dout, DEVARRAY(ρs), DEVARRAY(ss), eos, yₑ; ndrange=n)
+            KernelAbstractions.synchronize(BACKEND)
+            outc = T[evaluate(eos, ρ, s, yₑ, T(NaN)).p for (ρ, s) in zip(ρs, ss)]
+            @test maximum(abs.(Array(dout) .- outc) ./ outc) < sqrt(eps(T)) * 100
+
+            dout = DEVARRAY(zeros(T, n))
+            _gpu_c2p!(BACKEND, 64)(dout, DEVARRAY(D), DEVARRAY(τ), DEVARRAY(DY), DEVARRAY(Sp),
+                                   DEVARRAY(Sq), DEVARRAY(B2), eos, opts; ndrange=n)
+            KernelAbstractions.synchronize(BACKEND)
+            outg = Array(dout)
+            @test all(isfinite, outg)
+            @test maximum(abs.(outg .- ρs) ./ ρs) < sqrt(eps(T)) * 100
+        end
     end
 end

@@ -12,6 +12,10 @@ Three layers, each built on the one below:
   * a `prim2con`/`con2prim` pair over that potential, using entropy and
     rapidity as iteration variables, plus a policy layer that never fails.
 
+The solver is written against [`AbstractEOS`](@ref), so it runs equally on two
+closed-form EOSs: [`IdealGasEOS`](@ref) and [`HybridEOS`](@ref), the latter a
+generalized piecewise polytrope with a thermal part.
+
 The evaluation and inversion kernels are allocation-free, exception-free and
 generic in the scalar type, so they inline into a hydro code's inner loop and
 run on a GPU once the coefficient arrays are moved there with `Adapt.adapt`.
@@ -37,9 +41,11 @@ using StaticArrays: MVector, SVector
 
 # Kernel-side: no allocation, no exceptions, generic in the scalar type.
 include("core/defs.jl")
+include("core/eos_interface.jl")
 include("core/bspline_eval.jl")
 include("core/adapter_eval.jl")
 include("core/adapt.jl")
+include("core/analytic_eos.jl")
 include("core/prim2con.jl")
 include("core/con2prim.jl")
 include("core/state_policy.jl")
@@ -51,6 +57,7 @@ include("host/bspline_fit.jl")
 include("host/adapter_build.jl")
 include("host/check.jl")
 include("host/synthetic.jl")
+include("host/analytic_eos.jl")
 include("host/io_stellarcollapse.jl")
 
 include("precompile.jl")
@@ -66,8 +73,12 @@ export
     # B-splines
     BsplineView1, BsplineView3, BsplineEval1, BsplineEval3,
     bspline_eval1, bspline_eval3, BandedLU, fit_bspline_1d, fit_bspline_3d,
+    # The EOS interface
+    AbstractEOS, EOSPoint, SRange, logρ_bounds, yₑ_bounds,
+    # Analytic EOSs
+    IdealGasEOS, HybridEOS, polytropic_entropy,
     # Adapter
-    EOSPoint, SRange, UHighTailInfo, EOSTableView, narrow,
+    UHighTailInfo, EOSTableView, narrow,
     evaluate, eval_at, srange, srange_extended, sigma_extended, u_high_tail_info,
     # Solver
     Prim2ConOut, Con2PrimIn, Con2PrimOptions, Con2PrimOut, prim2con, con2prim,

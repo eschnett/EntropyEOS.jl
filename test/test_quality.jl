@@ -48,6 +48,17 @@ _jet_safe(v, cin, o, pol) = EntropyEOS.con2prim_safe(v, cin, o, pol)
             @test isempty(JET.get_reports(JET.report_opt(_jet_c2p, (V, Con2PrimIn{F}, Con2PrimOptions{F}))))
             @test isempty(JET.get_reports(JET.report_opt(_jet_safe,
                 (V, Con2PrimIn{F}, Con2PrimOptions{F}, PolicyOptions{F}))))
+            # The analytic EOSs run the same solver, and must be as clean.
+            for A in (typeof(IdealGasEOS(; Γ=2.0, K_ref=100.0, s_ref=5.0, s_window=(1.0, 20.0),
+                                         ρ_bounds=(1e-10, 1e-2), yₑ_bounds=(0.0, 1.0))),
+                      typeof(HybridEOS(; ρ_breaks=(1e-4,), K₀=100.0, Γs=(2.0, 2.5), Γ_th=5 / 3, K_th_ref=1.0,
+                                       s_ref=0.0, s_window=(1.0, 5.0), ρ_bounds=(1e-10, 1e-3),
+                                       yₑ_bounds=(0.0, 1.0))))
+                @test isempty(JET.get_reports(JET.report_opt(_jet_eval, (A, F, F, F, F))))
+                @test isempty(JET.get_reports(JET.report_opt(_jet_c2p, (A, Con2PrimIn{F}, Con2PrimOptions{F}))))
+                @test isempty(JET.get_reports(JET.report_opt(_jet_safe,
+                    (A, Con2PrimIn{F}, Con2PrimOptions{F}, PolicyOptions{F}))))
+            end
         else
             @info "JET analysis skipped on Julia $VERSION"
         end

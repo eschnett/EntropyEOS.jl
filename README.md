@@ -4,7 +4,8 @@
 * [![GitHub CI](https://github.com/eschnett/EntropyEOS.jl/workflows/CI/badge.svg)](https://github.com/eschnett/EntropyEOS.jl/actions)
 * [![codecov](https://codecov.io/gh/eschnett/EntropyEOS.jl/graph/badge.svg?token=2Z29OBMVB6)](https://codecov.io/gh/eschnett/EntropyEOS.jl)
 
-Handling tabulated equations of state for general-relativistic hydrodynamics.
+Handling tabulated equations of state for general-relativistic hydrodynamics,
+plus the analytic equations of state that the standard test problems need.
 
 This is a Julia translation of the C++ library
 [EntropyEOS](https://github.com/eschnett/EntropyEOS), covering the run-time
@@ -79,6 +80,27 @@ way to misuse the library. κ is part of the EOS identity, not an internal
 detail: a table swap that changes κ changes `D`, so checkpoints are not
 interchangeable across it.
 
+### Analytic EOSs
+
+The solver and the policy layer are written against `AbstractEOS`, not the
+table. Two closed-form EOSs implement it: `IdealGasEOS`, a Γ-law gas whose
+polytrope `p = Kρ^Γ` is one entropy (`polytropic_entropy`), and `HybridEOS`, a
+cold piecewise polytrope plus a thermal ideal gas. The cold part is the
+*generalized* piecewise polytrope of O'Boyle et al. (2020), whose sound speed is
+continuous at the breaks.
+
+```julia
+eos = IdealGasEOS(; Γ=2.0, K_ref=100.0, s_ref=5.0, s_window=(1.0, 20.0),
+                  ρ_bounds=(1e-12, 1e-2), yₑ_bounds=(0.0, 1.0))
+s = polytropic_entropy(eos, 100.0)          # the TOV polytrope p = 100 ρ²
+out = con2prim_safe(eos, cons, Con2PrimOptions(), default_policy(eos, 1e-10))
+```
+
+Both are `isbits` and go into a GPU kernel as they are. They have κ = 1, so
+`ρ★ = ρ`, and the units are the caller's. The documentation's "Analytic EOSs"
+page covers choosing the entropy window, and gives an SLy example built from the
+paper's fits.
+
 ## GPUs
 
 The kernels are allocation-free, exception-free and generic in the scalar type,
@@ -105,7 +127,7 @@ installed.
 
 The run-time path is complete and tested: table loading and checking, the
 B-spline fit, the adapter, `prim2con`, `con2prim`, and the never-fails policy
-layer. Roughly 31,000 assertions pass.
+layer, plus the analytic EOSs. Roughly 32,000 assertions pass.
 
 All five real tables are exercised end to end — LS220, the SRO LS220
 re-tabulation, DD2 (original and repaired) and SFHo — covering grids from
@@ -180,6 +202,11 @@ themselves.
   nuclear equation of state framework based on the liquid-drop model with
   Skyrme interaction*. Physical Review C 96:065802 (2017),
   [DOI:10.1103/PhysRevC.96.065802](https://doi.org/10.1103/PhysRevC.96.065802).
+
+- Michael F. O'Boyle, Charalampos Markakis, Nikolaos Stergioulas, Jocelyn S.
+  Read. *Parametrized equation of state for neutron star matter with continuous
+  sound speed*. Physical Review D 102:083027 (2020),
+  [DOI:10.1103/PhysRevD.102.083027](https://doi.org/10.1103/PhysRevD.102.083027).
 
 - Wolfgang Kastaun, Jay Vijay Kalinani, Riccardo Ciolfi. *Robust recovery of
   primitive variables in relativistic ideal magnetohydrodynamics*. Physical

@@ -20,54 +20,9 @@
 
 # ---------------------------------------------------------------------------
 # Results
+#
+# `EOSPoint` and `SRange` are part of the EOS interface, in core/eos_interface.jl.
 # ---------------------------------------------------------------------------
-
-"""
-    EOSPoint
-
-One evaluation of the EOS.
-
-The first five fields are what the con2prim Newton consumes; the next four are
-derived. Note the two distinct temperatures: `T_MeV` is the table temperature
-the solve landed on, which is what downstream tabulated physics indexes by,
-while `T̂ = U_s` is the thermodynamic conjugate the solver must use internally.
-They agree exactly only if the underlying table is thermodynamically
-consistent, and conflating them is a silent physics bug.
-
-`u_solved` is `log10(T_MeV)`, threaded back out as the warm start for the next
-call -- there is no hidden mutable state anywhere, which is what makes
-evaluation re-entrant and safe to call in parallel across grid points.
-"""
-struct EOSPoint{T<:Real}
-    U::T
-    U_ρ::T
-    U_s::T
-    U_ρρ::T
-    U_ρs::T
-    T̂::T
-    p::T
-    h::T
-    cs²::T
-    T_MeV::T
-    μ̃::T
-    u_solved::T
-    iters::Int32
-    flags::UInt32
-end
-
-"""
-    SRange
-
-The pointwise physical entropy window `[s(T_min), s(T_max)]` at fixed `(ρ*, Yₑ)`.
-
-The physical domain in `(ρ, s)` is *not* rectangular: `s_max` at the highest
-density is far below `s_max` at the lowest. Every entropy clamp must therefore
-be taken at the already-clamped `(ρ, Yₑ)`.
-"""
-struct SRange{T<:Real}
-    s_min::T
-    s_max::T
-end
 
 """
     UHighTailInfo
@@ -146,7 +101,7 @@ mirror objects to keep the device allocations alive, the coefficient arrays are
 held as ordinary array fields. `Adapt.adapt_structure` moves them to a device
 and the resulting view keeps them alive by itself.
 """
-struct EOSTableView{T<:AbstractFloat,A<:AbstractArray{T,3}}
+struct EOSTableView{T<:AbstractFloat,A<:AbstractArray{T,3}} <: AbstractEOS{T}
     σ::BsplineView3{T,A}   # entropy, k_B per baryon
     L::BsplineView3{T,A}   # log10(ε_cgs + energy_shift_cgs)
 
@@ -173,7 +128,9 @@ struct EOSTableView{T<:AbstractFloat,A<:AbstractArray{T,3}}
     max_iter::Int32
 end
 
-Base.eltype(::EOSTableView{T}) where {T} = T
+logρ_bounds(v::EOSTableView) = (v.x_lo, v.x_hi)
+yₑ_bounds(v::EOSTableView) = (v.y_lo, v.y_hi)
+κ(v::EOSTableView) = v.κ
 
 # ---------------------------------------------------------------------------
 # Tail construction
@@ -710,9 +667,6 @@ function evaluate(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where
 
     return eval_at(v, x_use, u, y, flags, iters)
 end
-
-evaluate(v::EOSTableView{S}, ρ★, s, yₑ, u_guess) where {S} =
-    evaluate(v, promote(float(ρ★), float(s), float(yₑ), float(u_guess))...)
 
 """
     eval_at(v, x_use, u, y, flags, iters)

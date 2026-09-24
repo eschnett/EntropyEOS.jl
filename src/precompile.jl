@@ -16,6 +16,9 @@
 # cost and the cache size for a path that is mostly taken on a GPU, where the
 # kernel is compiled separately anyway, so a host caller that wants it pays the
 # first-call cost.
+#
+# Of the analytic EOSs only the ideal gas is precompiled: `HybridEOS` is
+# specialized on its number of pieces, so no one instance would cover callers.
 
 using PrecompileTools: @compile_workload
 
@@ -53,4 +56,18 @@ using PrecompileTools: @compile_workload
     con2prim_safe(v, cin, copts, pol)
     # The excision branch compiles separately from the ordinary one.
     con2prim_safe(v, Con2PrimIn(cin.D, NaN, cin.D_Y, cin.S_par, cin.S_perp, cin.B²), copts, pol)
+
+    ig = IdealGasEOS(; Γ=2.0, K_ref=100.0, s_ref=5.0, s_window=(1.0, 20.0), ρ_bounds=(1e-10, 1e-2),
+                     yₑ_bounds=(0.0, 1.0))
+    ρ = 1e-4
+    pt = evaluate(ig, ρ, 5.0, 0.5, NaN)
+    c = prim2con(ig, ρ, 5.0, 0.5, 0.8, 0.1ρ, 0.3, NaN)
+    prim2con(ig, ρ, 5.0, 0.5, 0.8, SVector(1.0, 0.0, 0.0), SVector(0.0, 0.0, 1.0), NaN)
+    cin = Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²)
+    con2prim(ig, cin, copts, 5.0, 0.8, NaN)
+    con2prim(ig, cin, copts)
+    pol = default_policy(ig, 1e-9)
+    project_prim_state(ig, PrimState(ρ, 5.0, 0.5, 0.8), pol)
+    con2prim_safe(ig, cin, copts, pol)
+    con2prim_safe(ig, Con2PrimIn(cin.D, NaN, cin.D_Y, cin.S_par, cin.S_perp, cin.B²), copts, pol)
 end

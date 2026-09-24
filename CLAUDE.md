@@ -59,6 +59,11 @@ Everything in `src/core/` is kernel-side and runs on GPUs. It must stay
   warm start by 1e-3. Sampling the corners instead, or warm-starting from the
   exact truth, changes the failure rate by more than an order of magnitude in
   either implementation.
+- **Analytic EOSs have κ = 1**, so `ρ★ = ρ` there. But `HybridEOS`'s cold part
+  is the *generalized* piecewise polytrope (O'Boyle et al. 2020): its `Kᵢ` are
+  derived from continuity of `dp/dρ`, so classic Read-et-al. parameter sets give
+  a different EOS. Use the paper's own fits, and note that its Table II
+  misprints the second crust break (`1.826e6` should be `1.826e8`).
 - Never compare iteration counts or `C2PResult` across platforms; a state near a
   decision boundary legitimately takes a different path. Compare values.
 - A local coverage run scatters `*.cov` files through `src/`. They are
