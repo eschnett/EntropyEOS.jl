@@ -64,6 +64,13 @@ Everything in `src/core/` is kernel-side and runs on GPUs. It must stay
 - A local coverage run scatters `*.cov` files through `src/`. They are
   gitignored; delete them before grepping.
 
+## Quality gates
+
+`Aqua` and `JET` run in the suite (`test/test_quality.jl`). Aqua catches unused
+deps, missing compat bounds and stale exports; JET asserts the kernels are free
+of runtime dispatch. If you add a dependency or a kernel, they will tell you
+before CI does.
+
 ## Style
 
 Idiomatic Julia, not a transliteration. BlueStyle, 4-space indent, 132-column

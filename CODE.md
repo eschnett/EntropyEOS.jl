@@ -43,6 +43,7 @@ src/host/            owns memory, may throw, never needed on a device
   check.jl           table diagnostics
   synthetic.jl       an analytic ideal gas, and deliberate defect injectors
   io_stellarcollapse.jl   the stellarcollapse HDF5 reader (read side only)
+src/precompile.jl    PrecompileTools workload over the whole public Float64 path
 ```
 
 Include order in `EntropyEOS.jl` is dependency order, and `test/runtests.jl`
@@ -198,6 +199,22 @@ Gating is by environment variable so CI needs nothing: `ENTROPYEOS_TABLE_DIR`
 for the five real tables, `ENTROPYEOS_TEST_GPU` for a GPU backend. Both skip
 with an `@info` rather than failing.
 
+### Static analysis
+
+`Aqua` covers what unit tests structurally cannot — a declared but unused
+dependency, a missing compat bound, a stale export, a method ambiguity. It is
+how the unused `PrecompileTools` entry was eventually found, and it now runs in
+the suite so the next one is found immediately.
+
+`JET` asserts the property the GPU path depends on and that `@allocated` can
+only measure indirectly: no runtime dispatch and no type instability anywhere in
+`bspline_eval3`, `evaluate`, `prim2con`, `con2prim` or `con2prim_safe`. Analyse
+concrete argument types through a wrapper function — a closure over non-const
+globals reports its own captures as dynamic dispatch and buries the real signal.
+JET tracks the compiler closely enough that its results can shift with a Julia
+release, so it is pinned to 1.11 and newer rather than letting a new Julia turn
+a green suite red.
+
 ### Allocation gates
 
 These assert the property the whole GPU design rests on, and they are subtle to
@@ -211,6 +228,27 @@ measure. Two rules:
   cannot hold. `julia-runtest` turns both on by default, so CI carries a
   separate `allocations` job with them off. Keeping bounds checking on
   elsewhere is worth more than the gate: it catches real indexing bugs.
+
+## Latency
+
+`con2prim` inlines a deep tree: the spline contraction sits inside the designed
+tails, inside the EOS evaluation, inside the residual, inside the Newton loop,
+the inner solve, the bracket scan and the cold seed. Compiling that on first
+call is not cheap, and a hydro code would pay it at startup.
+
+`src/precompile.jl` runs the whole public `Float64` path over a five-point-per-axis
+table with the refinement and extension widths turned down — enough to reach
+every code path, since the types and therefore the specializations are identical
+to a real build's. Measured:
+
+| | precompile, once | cache | first call, every session |
+| --- | --- | --- | --- |
+| without the workload | 3.1 s | 1.6 MB | 3.65 s |
+| with | 5.3 s | 5.3 MB | **0.68 s** |
+
+and 0.65 s of that 0.68 s is `using` itself. `Float32` is deliberately not
+precompiled: it would roughly double both figures for a path whose numerics are
+unvalidated anyway.
 
 ## Validation against the C++
 
@@ -233,9 +271,6 @@ Where the two can be compared, they agree.
 
 ## Open items
 
-- `PrecompileTools` is declared in `Project.toml` but unused: the planned
-  `src/precompile.jl` workload was never written. Either add it — `con2prim` has
-  a deep inline tree and first-call latency is real — or drop the dependency.
 - No golden-file cross-checks against `eos_test --csv`. The invariant and
   closed-form oracles turned out strong enough that this was never needed, but
   the check-class violation sets would be cheap and exact to compare.

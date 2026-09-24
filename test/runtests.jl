@@ -9,6 +9,8 @@ using HDF5
 using LinearAlgebra
 using StaticArrays
 using Adapt
+using Aqua
+using JET
 using StableRNGs
 
 
@@ -32,4 +34,5 @@ include("testutil.jl")
     include("test_device_api.jl")
     include("test_gpu.jl")
     include("test_real_tables.jl")
+    include("test_quality.jl")
 end

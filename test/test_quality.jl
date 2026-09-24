@@ -1,0 +1,44 @@
+# Project hygiene and static analysis.
+#
+# Aqua is cheap and catches a class of defect that unit tests cannot: a
+# dependency declared but never used, a missing compat bound, a stale export, a
+# method ambiguity. It would have caught `PrecompileTools` sitting unused in
+# Project.toml, which is how that was eventually found.
+#
+# JET asserts the property the GPU path depends on and that `@allocated` can
+# only measure indirectly: no runtime dispatch and no type instability anywhere
+# in the kernels. Analyse concrete argument types via a wrapper function -- a
+# closure over non-const globals reports its own captures as dynamic dispatch
+# and buries the real signal.
+
+_jet_bs(v, x, u, y) = EntropyEOS.bspline_eval3(v, x, u, y)
+_jet_eval(v, ρ, s, y, u) = EntropyEOS.evaluate(v, ρ, s, y, u)
+_jet_p2c(v, ρ, s, y, w, b, c, u) = EntropyEOS.prim2con(v, ρ, s, y, w, b, c, u)
+_jet_c2p(v, cin, o) = EntropyEOS.con2prim(v, cin, o)
+_jet_safe(v, cin, o, pol) = EntropyEOS.con2prim_safe(v, cin, o, pol)
+
+@testset "quality" begin
+    @testset "Aqua" begin
+        Aqua.test_all(EntropyEOS)
+    end
+
+    @testset "JET: kernels are free of runtime dispatch" begin
+        # JET's analysis tracks the compiler, so results can shift with a Julia
+        # release. Pin it to the versions this package is developed against
+        # rather than have a new Julia turn a green suite red.
+        if VERSION >= v"1.11"
+            tbl = make_synthetic_table(SyntheticOptions(; nρ=8, nT=8, nYₑ=8))
+            v = EOSTableView(EntropyEOS.build_eos(tbl))
+            V, F = typeof(v), Float64
+            BV = typeof(v.σ)
+            @test isempty(JET.get_reports(JET.report_opt(_jet_bs, (BV, F, F, F))))
+            @test isempty(JET.get_reports(JET.report_opt(_jet_eval, (V, F, F, F, F))))
+            @test isempty(JET.get_reports(JET.report_opt(_jet_p2c, (V, F, F, F, F, F, F, F))))
+            @test isempty(JET.get_reports(JET.report_opt(_jet_c2p, (V, Con2PrimIn{F}, Con2PrimOptions{F}))))
+            @test isempty(JET.get_reports(JET.report_opt(_jet_safe,
+                (V, Con2PrimIn{F}, Con2PrimOptions{F}, PolicyOptions{F}))))
+        else
+            @info "JET analysis skipped on Julia $VERSION"
+        end
+    end
+end

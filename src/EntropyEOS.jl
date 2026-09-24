@@ -52,6 +52,8 @@ include("host/check.jl")
 include("host/synthetic.jl")
 include("host/io_stellarcollapse.jl")
 
+include("precompile.jl")
+
 export
     # Flags and outcomes
     FLAG_CLAMP_YE, FLAG_EXT_S_LOW, FLAG_EXT_S_HIGH, FLAG_EXT_ρ_LOW,
