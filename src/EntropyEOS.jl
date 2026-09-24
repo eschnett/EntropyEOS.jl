@@ -23,10 +23,11 @@ campaign, and the run-time path contains no repair logic. Use `check_table` to
 detect a table that has not been repaired.
 
 !!! note "Precision"
-    All defaults and all validation are at `Float64`. Narrower scalar types
-    are supported by the plumbing -- the code is type-generic, type-stable and
-    allocation-free at `Float32` -- but the numerics are not validated there,
-    and some tolerances are not representable.
+    `Float64` is the reference and is validated on CUDA as well as on the
+    host. A `Float32` table with `Float64` arithmetic is validated too, and
+    halves the table's memory. Pure `Float32` is measured and usable, with
+    real accuracy limits -- see the "Precision and GPUs" page of the
+    documentation. Other scalar types run but are not validated.
 """
 module EntropyEOS
 

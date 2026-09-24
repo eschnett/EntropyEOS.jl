@@ -53,6 +53,8 @@
         @test E.tau_floor_rel(Float64) == 1.0e-16
         @test E.tsolve_residual_tol(Float64) == 1.0e-12
         @test E.tsolve_step_tol(Float64) == 1.0e-13
+        @test E.seed_z_tol(Float64) == 1.0e-14
+        @test E.con2prim_tol(Float32) == 512 * eps(Float32)
         @test E.perp_degenerate(Float64) == 1.0e-300
         @test E.ln10(Float64) == log(10.0)
         @test E.BRACKET_SCAN_MAX == 33
@@ -65,6 +67,7 @@
         @test E.con2prim_tol(Float32) > eps(Float32)
         @test E.tsolve_residual_tol(Float32) > eps(Float32)
         @test E.tsolve_step_tol(Float32) > eps(Float32)
+        @test E.seed_z_tol(Float32) > eps(Float32)
         # 1e-300 underflows to exactly zero in Float32, which would switch the
         # guard off and let Inf*0 produce a NaN.
         @test E.perp_degenerate(Float32) > 0

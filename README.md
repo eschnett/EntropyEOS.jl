@@ -91,9 +91,15 @@ dv = adapt(MtlArray, EntropyEOS.narrow(v, Float32))
 # pass dv into your own kernel; KernelAbstractions adapts it the rest of the way
 ```
 
-Verified by running `evaluate` and `con2prim` as KernelAbstractions kernels on
-a Metal GPU. Enable the GPU testset with `ENTROPYEOS_TEST_GPU=metal` (or
-`cuda`) and the corresponding package installed.
+Verified on CUDA (NVIDIA H200) at Float64, where the device is
+indistinguishable from the host on all five real tables, and on Metal at
+Float32. A Float32 table with Float64 arithmetic —
+`adapt(CuArray, EntropyEOS.narrow(v, Float32))`, called with `Float64`
+arguments — halves the table's memory at essentially no cost to `con2prim`.
+Pure Float32 is usable but has real accuracy limits; the documentation's
+"Precision and GPUs" page has the measurements. Enable the GPU testset with
+`ENTROPYEOS_TEST_GPU=cuda` (or `metal`) and the corresponding package
+installed.
 
 ## Status
 

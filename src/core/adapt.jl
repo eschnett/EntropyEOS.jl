@@ -54,8 +54,10 @@ end
 """
     narrow(v, S)
 
-A copy of `v` with scalar type `S`. Note that the physics is only validated at
-`Float64`; see the package documentation.
+A copy of `v` with scalar type `S`. Calling the result with `Float64`
+arguments gives Float64 arithmetic against a Float32 table, which is validated
+and costs con2prim essentially nothing; pure Float32 has real accuracy limits.
+See the "Precision and GPUs" page of the documentation.
 """
 function narrow(v::BsplineView3, ::Type{S}) where {S<:AbstractFloat}
     return BsplineView3(convert(Array{S,3}, v.c), S(v.x0), S(v.hx), S(v.u0), S(v.hu), S(v.y0), S(v.hy))

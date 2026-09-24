@@ -193,6 +193,56 @@ end
         @test E.seed_z_solve(D, 0.5D, 0.0, 0.0, 0.0, 40) == D
     end
 
+    @testset "seed_z_solve does not overflow Float32" begin
+        # Conserved quantities reach 1e17..1e21 on real tables, so B²·S⊥² and q³
+        # are far beyond floatmax(Float32). Formed naively, the residual became
+        # Inf, bisection drove z to its lower bound, and every magnetized
+        # Float32 cold start began at w_max -- a tenth of them then failed.
+        D, E_tot, p = 1.0e17, 4.0e19, 1.0e18
+        for (S_perp, B²) in ((3.9e19, 1.0e13), (2.0e19, 1.0e17), (1.0e19, 5.0e19))
+            z64 = E.seed_z_solve(D, E_tot, p, S_perp, B², 40)
+            z32 = E.seed_z_solve(Float32.((D, E_tot, p, S_perp, B²))..., 40)
+            @test z32 isa Float32
+            @test isfinite(z32)
+            @test z32 ≈ z64 rtol = 1e-5
+        end
+    end
+
+    @testset "Float32 round trip" begin
+        # The measured Float32 behaviour (docs/src/precision.md), held on the
+        # synthetic table where it is cheap. The conservatives are built at
+        # Float32 too, so what is measured is the solver rather than the
+        # conditioning of rounding a Float64 state. At the old 64-eps tolerance,
+        # below the Float32 residual's noise floor, this sample had 7 cold
+        # failures.
+        v32 = E.narrow(v, Float32)
+        o32 = Con2PrimOptions{Float32}()
+        @test o32.tol == 512 * eps(Float32)
+        rng = StableRNG(32)
+        nfail_cold = nfail_warm = 0
+        errs = Float64[]
+        for _ in 1:2000
+            ρ = Float32(exp10(v.x_lo + (v.x_hi - v.x_lo) * rand(rng)))
+            yₑ = Float32(v.y_lo + (v.y_hi - v.y_lo) * rand(rng))
+            sr = srange(v32, ρ, yₑ)
+            s = sr.s_min + (sr.s_max - sr.s_min) * Float32(0.05 + 0.9rand(rng))
+            w = Float32(4rand(rng))
+            pt = evaluate(v32, ρ, s, yₑ, NaN32)
+            B² = rand(rng) < 0.5 ? ρ * pt.h * Float32(exp10(-6 + 7rand(rng))) : 0.0f0
+            c = prim2con(v32, ρ, s, yₑ, w, B², Float32(2rand(rng) - 1), pt.u_solved)
+            cin = Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²)
+            oc = con2prim(v32, cin, o32)
+            ow = con2prim(v32, cin, o32, s, w, pt.u_solved)
+            ok(o) = o.result === E.C2PResult.converged_newton || o.result === E.C2PResult.converged_fallback
+            ok(oc) ? push!(errs, abs(oc.ρ - ρ) / ρ) : (nfail_cold += 1)
+            ok(ow) || (nfail_warm += 1)
+        end
+        @test nfail_cold <= 2
+        @test nfail_warm == 0
+        sort!(errs)
+        @test errs[ceil(Int, 0.99 * length(errs))] < 1e-3
+    end
+
     @testset "allocation-free and type-generic" begin
         ρ, yₑ = exp10(0.5 * (v.x_lo + v.x_hi)), 0.35
         sr = srange(v, ρ, yₑ)

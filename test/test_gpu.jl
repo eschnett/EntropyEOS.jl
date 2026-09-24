@@ -28,13 +28,13 @@ else
             global gpu_ok = Metal.functional()
             @eval const BACKEND = MetalBackend()
             @eval const DEVARRAY = MtlArray
-            @eval const GPU_ELTYPE = Float32       # Metal has no Float64
+            @eval const GPU_ELTYPES = (Float32,)   # Metal has no Float64
         elseif GPU_BACKEND == "cuda"
             @eval using CUDA, KernelAbstractions
             global gpu_ok = CUDA.functional()
             @eval const BACKEND = CUDABackend()
             @eval const DEVARRAY = CuArray
-            @eval const GPU_ELTYPE = Float64
+            @eval const GPU_ELTYPES = (Float64, Float32)
         end
     catch err
         @info "GPU backend '$GPU_BACKEND' unavailable" err
@@ -56,9 +56,8 @@ else
             @inbounds outρ[i] = o.ρ
         end
 
-        @testset "GPU ($GPU_BACKEND)" begin
+        @testset "GPU ($GPU_BACKEND, $T)" for T in GPU_ELTYPES
             E = EntropyEOS
-            T = GPU_ELTYPE
             tbl = make_synthetic_table()
             v = E.narrow(EOSTableView(E.build_eos(tbl)), T)
             yₑ = T(0.35)
