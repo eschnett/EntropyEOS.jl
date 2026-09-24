@@ -1,6 +1,6 @@
 name = "EntropyEOS"
 uuid = "75b96802-7bb2-4b1d-85f8-8113624a580e"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["Erik Schnetter <schnetter@gmail.com>"]
 
 [deps]
