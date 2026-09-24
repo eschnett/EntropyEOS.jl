@@ -12,6 +12,7 @@ makedocs(;
         "Tables" => "tables.md",
         "Adapter" => "adapter.md",
         "Solver" => "solver.md",
+        "Precision and GPUs" => "precision.md",
         "Internals" => "internals.md",
     ],
 )

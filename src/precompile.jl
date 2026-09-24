@@ -13,8 +13,9 @@
 # compiled specializations are identical to a real build's.
 #
 # `Float32` is not precompiled. It would roughly double both the precompilation
-# cost and the cache size, and the numerics there are unvalidated anyway (see
-# CODE.md), so the rare caller that wants it pays the first-call cost.
+# cost and the cache size for a path that is mostly taken on a GPU, where the
+# kernel is compiled separately anyway, so a host caller that wants it pays the
+# first-call cost.
 
 using PrecompileTools: @compile_workload
 

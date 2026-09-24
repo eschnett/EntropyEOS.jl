@@ -247,8 +247,33 @@ to a real build's. Measured:
 | with | 5.3 s | 5.3 MB | **0.68 s** |
 
 and 0.65 s of that 0.68 s is `using` itself. `Float32` is deliberately not
-precompiled: it would roughly double both figures for a path whose numerics are
-unvalidated anyway.
+precompiled: it would roughly double both figures for a path mostly taken on a
+GPU, where the kernel is compiled separately anyway.
+
+## Precision and devices
+
+Measured by the scripts in `study/`, which are run by hand and are not part of
+the test suite; the numbers are on the "Precision and GPUs" documentation page
+(`docs/src/precision.md`). In short: Float64 is validated on CUDA (H200) with
+the device indistinguishable from the host; a Float32 table with Float64
+arithmetic is validated too; pure Float32 is usable with measured limits.
+
+What is easy to get wrong here:
+
+- **The Float32 limits are mostly the hydro state's, not the solver's.** The
+  Float64 solver applied to Float32-rounded conservatives — the study's
+  "floor" — already fails on 7–13% of cold states, because τ in Float32 cannot
+  resolve their thermal energy. Judge any Float32 change against the floor, not
+  against Float64.
+- **Float32 derivatives lose ~3 digits** to cancellation between spline
+  coefficients of size ~20. Device–host differences at Float32 are therefore
+  ~1e-4, not ~1e-7, and are not a device defect.
+- **Products of two conserved quantities overflow Float32** (they reach 1e20
+  each). `seed_z_solve` did this until the study found it; keep such terms in
+  ratio form.
+- **`con2prim_tol(Float32)` is measured**, at 512 eps, just above the Float32
+  residual's noise floor. The generic 64-eps fallback was below it and made
+  Newton stall.
 
 ## Validation against the C++
 
@@ -274,10 +299,9 @@ Where the two can be compared, they agree.
 - No golden-file cross-checks against `eos_test --csv`. The invariant and
   closed-form oracles turned out strong enough that this was never needed, but
   the check-class violation sets would be cheap and exact to compare.
-- `Float32` is plumbed but **not validated**. The kernels are type-stable and
-  allocation-free there, and the tolerances are representable, but the numerics
-  are unstudied — as in the C++, where a float path is listed as needing its own
-  accuracy study first.
-- The GPU path is exercised on Metal (Float32 only). CUDA at `Float64` is
-  supported by construction but untested here.
+- Float32 derivative accuracy (`p`, `cs²`, `μ̃`) is limited by the
+  representation — spline coefficients of `log10(ε + shift)` — not by the code.
+  Storing the coefficients with a per-cell offset and recovering ε with `expm1`
+  could lift it (untested), at the cost of departing from the C++'s
+  representation.
 - `check_table` is serial; see "Threading".
