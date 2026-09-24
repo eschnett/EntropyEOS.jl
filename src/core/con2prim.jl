@@ -30,9 +30,9 @@ end
 """
     Con2PrimOptions
 
-Solver knobs. Every default was measured at `Float64`; see `defs.jl` for how
-the tolerances behave at other scalar types, and note that the physics is not
-validated below `Float64`.
+Solver knobs. Every default was measured at `Float64`, and the `Float32`
+tolerance in this port's own accuracy study; see `defs.jl`, and the "Precision
+and GPUs" page of the documentation for what Float32 costs.
 """
 struct Con2PrimOptions{T<:Real}
     tol::T
@@ -513,7 +513,6 @@ the exact hydrodynamic result, recovered rather than special-cased.
 """
 function seed_z_solve(D::T, E::T, p::T, S_perp::T, B²::T, n_iter::Integer) where {T}
     A = E + p + T(0.5) * B²
-    half_num = T(0.5) * B² * S_perp * S_perp
 
     # Formed factor-wise so an intermediate product cannot overflow at the
     # magnitudes real tables reach.
@@ -531,10 +530,16 @@ function seed_z_solve(D::T, E::T, p::T, S_perp::T, B²::T, n_iter::Integer) wher
     q = hi
     if hi > lo
         for _ in 1:n_iter
-            H = q - A + half_num / (q * q)
+            # B²S⊥²/(2q²) is carried as ½B²(S⊥/q)², where S⊥/q is a velocity. The
+            # textbook form squares and cubes conserved quantities, which reach
+            # 1e20 and overflow Float32; the resulting Inf drove the bracket to
+            # its lower end and the seed to w_max on every magnetized state.
+            vq = S_perp / q
+            m = T(0.5) * B² * vq * vq
+            H = q - A + m
             H < zero(T) ? (lo = q) : (hi = q)
-            abs(H) <= T(1.0e-14) * A && break
-            dH = one(T) - T(2) * half_num / (q * q * q)
+            abs(H) <= seed_z_tol(T) * A && break
+            dH = one(T) - T(2) * m / q
             q_next = zero(T)
             newton_ok = false
             if dH > zero(T)

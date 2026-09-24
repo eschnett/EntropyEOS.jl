@@ -119,9 +119,10 @@ argument only has to be harmless, not meaningful.
 #
 # Every value below was *measured* at `Float64` in the C++ (see the option
 # comments in `core/con2prim.hpp`). The `Float64` methods therefore reproduce
-# those decisions exactly. The generic fallbacks scale with `eps(T)` so that a
-# narrower type produces something runnable -- they are not validated, and
-# neither is the physics at `Float32`.
+# those decisions exactly. `con2prim_tol` also has a `Float32` method measured
+# in this port's own accuracy study. The generic fallbacks scale with `eps(T)`
+# so that any other narrower type produces something runnable -- they are not
+# validated.
 # ---------------------------------------------------------------------------
 
 """ln(10), to `Float64` precision, as the C++ `constexpr` is."""
@@ -130,6 +131,14 @@ argument only has to be harmless, not meaningful.
 
 """Convergence tolerance for `con2prim`'s two normalized residuals."""
 @inline con2prim_tol(::Type{Float64}) = 1.0e-12
+# Measured (study/float32_accuracy.jl, docs/src/precision.md): evaluated in
+# Float32, the energy residual has a noise floor of 2.0e-5 to 3.8e-5 at p99 on
+# the real tables -- the log-shifted energy fit and the spline sums lose ~250
+# ulps. A tolerance below that cannot be met: at 64 eps Newton stalled and
+# 0.4-0.7% of warm starts failed. 512 eps is the smallest power of two above
+# the floor on every table, and brings Float32 failure counts to within a small
+# factor of Float64's.
+@inline con2prim_tol(::Type{Float32}) = 512 * eps(Float32)
 @inline con2prim_tol(::Type{T}) where {T<:AbstractFloat} = max(T(1.0e-12), T(64) * eps(T))
 @inline con2prim_tol(::Type{T}) where {T<:Real} = T(con2prim_tol(Float64))
 
@@ -147,6 +156,11 @@ argument only has to be harmless, not meaningful.
 @inline tsolve_step_tol(::Type{Float64}) = 1.0e-13
 @inline tsolve_step_tol(::Type{T}) where {T<:AbstractFloat} = max(T(1.0e-13), T(8) * eps(T))
 @inline tsolve_step_tol(::Type{T}) where {T<:Real} = T(tsolve_step_tol(Float64))
+
+"""Relative residual at which the cold seed's EOS-free solve for `z` stops."""
+@inline seed_z_tol(::Type{Float64}) = 1.0e-14
+@inline seed_z_tol(::Type{T}) where {T<:AbstractFloat} = max(T(1.0e-14), T(4) * eps(T))
+@inline seed_z_tol(::Type{T}) where {T<:Real} = T(seed_z_tol(Float64))
 
 """Rapidity a negative Newton step is reflected to, instead of exactly zero."""
 @inline tiny_w(::Type{T}) where {T<:Real} = T(1.0e-10)
