@@ -19,7 +19,18 @@ _jet_safe(v, cin, o, pol) = EntropyEOS.con2prim_safe(v, cin, o, pol)
 
 @testset "quality" begin
     @testset "Aqua" begin
-        Aqua.test_all(EntropyEOS)
+        # `persistent_tasks` bounds how long the probe process may take to
+        # *exit* after loading the package; loading itself is unbounded. The
+        # default 30 s is ample on a developer machine but has timed out on a
+        # loaded two-core CI runner, where the probe must precompile this
+        # package and every dependency from scratch — the more so since the
+        # `@compile_workload` made precompilation ~70% more expensive, and
+        # since a job running under non-default `--check-bounds` cannot reuse
+        # the existing cache. The workload runs at precompile time in a
+        # separate process, so it cannot leave a task behind at load time;
+        # raising the limit is Aqua's own documented remedy rather than
+        # switching the check off.
+        Aqua.test_all(EntropyEOS; persistent_tasks=(; tmax=180))
     end
 
     @testset "JET: kernels are free of runtime dispatch" begin
