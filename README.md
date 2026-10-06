@@ -4,8 +4,7 @@
 * [![GitHub CI](https://github.com/eschnett/EntropyEOS.jl/workflows/CI/badge.svg)](https://github.com/eschnett/EntropyEOS.jl/actions)
 * [![codecov](https://codecov.io/gh/eschnett/EntropyEOS.jl/graph/badge.svg?token=2Z29OBMVB6)](https://codecov.io/gh/eschnett/EntropyEOS.jl)
 
-Handling tabulated equations of state for general-relativistic hydrodynamics,
-plus the analytic equations of state that the standard test problems need.
+Handling tabulated and analytic equations of state for general-relativistic hydrodynamics.
 
 This is a Julia translation of the C++ library
 [EntropyEOS](https://github.com/eschnett/EntropyEOS), covering the run-time
@@ -13,11 +12,18 @@ path a hydro code actually calls: loading a table, checking it, and using it.
 
 [CODE.md](CODE.md) describes how the package is built and why.
 
+- [What it does](#what-it-does)
+- [Usage](#usage)
+- [GPUs](#gpus)
+- [Status](#status)
+- [Relationship to the C++ library](#relationship-to-the-c-library)
+- [References](#references)
+
 ## What it does
 
-Real EOS tables store a bundle of columns `F(ρ, T, Yₑ)` on a rectangular grid.
+Real-world EOS tables store a bundle of columns `F(ρ, T, Yₑ)` (the free energy) on a rectangular grid.
 A hydrodynamics solver wants something else: a single thermodynamic potential
-with consistent derivatives. This package builds that potential,
+with consistent derivatives. This package builds that potential (the internal energy),
 
 ```
 U(ρ, s, Yₑ) = ε(ρ, T(ρ, s, Yₑ), Yₑ),    where  σ(ρ, T, Yₑ) = s
@@ -119,9 +125,8 @@ Float32. A Float32 table with Float64 arithmetic —
 `adapt(CuArray, EntropyEOS.narrow(v, Float32))`, called with `Float64`
 arguments — halves the table's memory at essentially no cost to `con2prim`.
 Pure Float32 is usable but has real accuracy limits; the documentation's
-"Precision and GPUs" page has the measurements. Enable the GPU testset with
-`ENTROPYEOS_TEST_GPU=cuda` (or `metal`) and the corresponding package
-installed.
+"Precision and GPUs" page has the measurements. The GPU testset is described in
+[CODE.md § Testing](CODE.md#testing).
 
 ## Status
 
@@ -131,57 +136,18 @@ layer, plus the analytic EOSs. Roughly 32,000 assertions pass.
 
 All five real tables are exercised end to end — LS220, the SRO LS220
 re-tabulation, DD2 (original and repaired) and SFHo — covering grids from
-234×136×50 to 391×163×66. Set `ENTROPYEOS_TABLE_DIR` to enable those tests.
+234×136×50 to 391×163×66 (see [CODE.md § Testing](CODE.md#testing) to enable
+those tests). Adapter build times and their threading are in
+[CODE.md § Threading](CODE.md#threading).
 
-Building the adapter is dominated by the refined-grid scans that derive κ.
-Those are threaded over the Yₑ slices, so the cost falls with
-`JULIA_NUM_THREADS`: on twelve threads LS220 builds in 2.4 s and the 391×163×66
-SRO table in 7.9 s, against 15 s and 37 s serially. The partition is fixed
-rather than thread-dependent and the reduction is a minimum, so the result is
-bitwise identical whatever the thread count — which matters, because κ is part
-of the EOS identity.
-
-Table *repair* is deliberately not included — it is an offline activity
-performed once before a simulation campaign, and the run-time path contains no
-repair logic. Use the C++ `eos_repair` tool for that, and `check_table` here to
-detect a table that has not been repaired.
+Table *repair* is deliberately not included; see [CODE.md § Scope](CODE.md#scope).
+Use the C++ `eos_repair` tool for that.
 
 ## Relationship to the C++ library
 
-Where the two can be compared they agree. The fitted B-spline coefficients are
-**bitwise identical** to the C++ when it is built with `-ffp-contract=off`
-(at clang's default some coefficients differ in the last bits, because clang
-fuses the elimination update into an FMA and Julia does not). Reproducing the
-configuration of the C++ README's worked example returns every digit it
-publishes.
-
-Statistically the two agree on real tables. Running both audits on the
-unrepaired LS220 with matched sampling and a 1e-3-perturbed warm start, over
-20,000 warm and 2,000 cold states:
-
-| | C++ | Julia |
-| --- | --- | --- |
-| warm Newton / fallback / failed | 19964 / 36 / 0 | 19958 / 42 / 0 |
-| cold failures | 1 | 1 |
-| density round trip, median | 1.89e-13 | 1.97e-13 |
-| p99 | 2.55e-09 | 2.43e-09 |
-| p99.9 | 1.03e-08 | 1.05e-08 |
-
-Both also reproduce the documented accept-and-guard outlier tail on DD2 — a
-handful of states per 20,000 where the round trip is poor. That is a property
-of the tables, and a port showing *none* of them would be sampling
-differently, not doing better. (On DD2 the C++'s own worst warm density error
-is 1.6; this port's is 0.18.)
-
-Exact agreement is not achievable everywhere and is not attempted: Julia's
-`log10` and `exp10` differ from the system libm by about one unit in the last
-place, and the table is stored logarithmically. So correctness rests on
-mathematical invariants and closed-form ground truth rather than on
-cross-language comparison — for instance the extension machinery is asserted to
-be *bitwise* transparent inside the table, the analytic Jacobian is checked
-against automatic differentiation rather than finite differences, and the
-policy layer's returned states are re-solved to confirm they reproduce
-themselves.
+Where the two can be compared they agree. The measurements are in
+[CODE.md § Validation against the C++](CODE.md#validation-against-the-c), and
+why exact agreement is not attempted is in [CODE.md § Testing](CODE.md#testing).
 
 ## References
 

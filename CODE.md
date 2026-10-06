@@ -4,7 +4,34 @@ Companion to [README.md](README.md), which covers what the package is for and
 how to call it. This document covers how it is built and why. The physics is
 specified by the C++ repository's design notes — `eos-adapter-F-to-U.md`,
 `con2prim-entropy-rapidity.md`, `eos-causal-tail.md` — which this port follows
-rather than restates.
+rather than restates; [README § What it does](README.md#what-it-does) summarizes
+the method. How the design got here is in [HISTORY.md](HISTORY.md).
+
+- [Scope](#scope)
+- [Environment](#environment)
+- [Layout](#layout)
+- [Data model and units](#data-model-and-units)
+- [Type design](#type-design)
+- [Discipline in `core/`](#discipline-in-core)
+- [Deliberate deviations from the C++](#deliberate-deviations-from-the-c)
+- [Threading](#threading)
+- [Testing](#testing)
+  - [Static analysis](#static-analysis)
+  - [Allocation gates](#allocation-gates)
+- [Latency](#latency)
+- [Precision and devices](#precision-and-devices)
+- [Validation against the C++](#validation-against-the-c)
+- [Open items](#open-items)
+
+## Scope
+
+Only the run-time path a hydro code calls: load a table, check it, evaluate it,
+and invert it.
+
+Table *repair* is deliberately not included — it is an offline activity
+performed once before a simulation campaign, and the run-time path contains no
+repair logic. Use the C++ `eos_repair` tool for that, and `check_table` here to
+detect a table that has not been repaired.
 
 ## Environment
 
@@ -14,6 +41,10 @@ rather than restates.
   `StaticArrays` (one stack buffer), `EnumX` (namespaced outcome enums).
   Deliberately **not** dependencies: `CUDA`, `Metal`, `KernelAbstractions`.
   A caller brings its own backend; see "GPU" below.
+
+  **Inconsistent:** this list does not name `PrecompileTools`, while
+  [Layout](#layout) and [Latency](#latency) describe `src/precompile.jl` as a
+  `PrecompileTools` workload.
 - Tests additionally use `ForwardDiff` (the derivative oracle) and `StableRNGs`
   (Julia's default streams are not stable across minor versions, and a test
   that silently samples different points after an upgrade is not a test).
@@ -68,17 +99,14 @@ Two format traps: `energy_shift`, `have_rel_cs2` and `points*` are one-element
 family and is **not in the file** (amu for LS220, DD2, SFHo; the neutron mass
 for the SRO tabulation).
 
-Table-side units are cgs plus MeV plus k_B per baryon. The run-time path is
-unit-free: conversion happens once, when the adapter is built, and the view
-carries the pre-computed scalars. At that boundary ρ means **ρ\* = κ·ρ** in
-κ-rescaled g/cm³, `s` is k_B per baryon, `w` is the rapidity, and `D`, `τ`,
-`S_par`, `S_perp`, `B²` are all g/cm³.
+Table-side units are cgs plus MeV plus k_B per baryon. The run-time path's
+units, and why κ is part of the EOS identity, are in
+[README § Units](README.md#units); the view carries the pre-computed scalars
+of the conversion done when the adapter is built.
 
-κ is part of the EOS identity, not an internal detail. It re-zeroes the energy
-so `U ≥ 0` — which is what lets `prim2con` build τ without cancellation — and
-the rescaling is exact rather than approximate: `ρ*(1+U) = ρ(1+ε)` holds
-bitwise, and is asserted. A table swap that changes κ changes `D`, so
-checkpoints are not interchangeable across it.
+κ re-zeroes the energy so `U ≥ 0` — which is what lets `prim2con` build τ
+without cancellation — and the rescaling is exact rather than approximate:
+`ρ*(1+U) = ρ(1+ε)` holds bitwise, and is asserted.
 
 ## Type design
 
@@ -95,14 +123,16 @@ types keep `AbstractFloat`, since that is an array element type.
 `AbstractEOS`. They reach it only through `evaluate`, `srange`,
 `srange_extended`, `logρ_bounds` and `yₑ_bounds`, and every method is typed on
 the abstract type. The contract is stated once, in `core/eos_interface.jl`.
-Introducing it changed no arithmetic: a hash over 3,000 states of every entry
-point's output was bitwise unchanged. `EntropyEOS.κ` is part of the interface but
-is not exported, since `κ` is too common a name to take from a caller.
+Introducing it changed no arithmetic ([HISTORY](HISTORY.md#the-eos-interface)).
+`EntropyEOS.κ` is part of the interface but is not exported, since `κ` is too common a name to take from a caller.
 
-**The analytic EOSs** have no C++ counterpart. `IdealGasEOS` is a Γ-law gas,
-and `HybridEOS` is the generalized piecewise polytrope of O'Boyle et al. (2020)
-plus a thermal Γ-law. The generalized form was chosen over the classic one
+**The analytic EOSs** have no C++ counterpart; what they are is in
+[README § Analytic EOSs](README.md#analytic-eoss). The generalized form of
+`HybridEOS`'s cold part was chosen over the classic one
 (Read et al. 2009) because it makes `dp/dρ` continuous as well as `p` and `ε`.
+Its `Kᵢ` are derived from continuity of `dp/dρ`, so classic Read-et-al.
+parameter sets give a different EOS. Use the paper's own fits, and note that its
+Table II misprints the second crust break (`1.826e6` should be `1.826e8`).
 The classic form's jumps in `cs²` would put jumps into con2prim's Jacobian, which
 the table path is C² precisely to avoid. Both EOSs are closed-form, so
 `evaluate` neither clamps nor iterates; the box only sets flags. The terms are
@@ -130,13 +160,17 @@ never change precision silently.
 ## Discipline in `core/`
 
 No heap allocation, no `throw`, no `@fastmath`, no closures, no `String`; array
-reads `@inbounds`, small helpers `@inline`. Three consequences worth naming:
+reads `@inbounds`, small helpers `@inline`. Kernel-side structs stay `isbits`;
+a NaN sentinel is not replaced with `Union{Nothing,T}`, because NaN is
+load-bearing and flows through arithmetic. Three consequences worth naming:
 
 - **Domain-safe math.** `log10`, `sqrt` and `floor(Int, ·)` throw in Julia where
   C returns NaN or is merely unspecified. `core/defs.jl` provides `safe_log10`,
   `safe_sqrt` and `trunc_floor`. `Base.isnan` and `isfinite` are already exactly
   the self-comparison tricks the C++ hand-rolls, so they are used directly — but
   only because `@fastmath` is banned, which a test enforces by grep.
+  `@fastmath` folds the NaN and finiteness probes to the wrong answer, exactly as
+  `-ffast-math` does in the C++.
 - **Per-type tolerances.** Every numeric constant is a function of the scalar
   type, not a literal, because a bare `Float64` literal silently widens `Float32`
   arithmetic. The `Float64` methods reproduce the C++'s measured values exactly;
@@ -145,9 +179,8 @@ reads `@inbounds`, small helpers `@inline`. Three consequences worth naming:
   cannot recompute them (each costs an inner solve, and the warm-start chain
   fixes their order). It uses `MVector{33,T}`, local and non-escaping so it is
   promoted out of the heap. The cap is a `Val` parameter so a GPU caller can
-  shrink per-thread local memory without touching the algorithm. This was the
-  design's biggest open risk; it is resolved by the kernel compiling and running
-  on Metal.
+  shrink per-thread local memory without touching the algorithm
+  ([HISTORY](HISTORY.md#the-one-stack-buffer)).
 
 ## Deliberate deviations from the C++
 
@@ -168,12 +201,14 @@ Everything else follows the C++ decision for decision, including the parts that
 look wrong until you read why: the Newton step is clamped and taken
 unconditionally rather than backtracked, convergence is tested on the
 cosh-normalized residual, comparisons use a scaled max-norm rather than an L2
-norm, and a Newton iterate is substituted into a *failed* fallback only.
+norm, the sort is the hand-rolled insertion sort, the guard precedence in the
+tails is kept, and a Newton iterate is substituted into a *failed* fallback
+only. These measured-and-kept quirks are load-bearing.
 
 ## Threading
 
-The two refined-grid scans in `build_eos` dominate build cost and run one Yₑ
-slice per thread. On twelve threads LS220 builds in 2.4 s against 15 s serial,
+The two refined-grid scans in `build_eos` that derive κ dominate build cost
+and run one Yₑ slice per thread. On twelve threads LS220 builds in 2.4 s against 15 s serial,
 and the 391×163×66 SRO table in 7.9 s against 37 s.
 
 The partition is one accumulator per slice — **fixed, not thread-dependent** —
@@ -233,12 +268,15 @@ Gating is by environment variable so CI needs nothing: `ENTROPYEOS_TABLE_DIR`
 for the five real tables, `ENTROPYEOS_TEST_GPU` for a GPU backend. Both skip
 with an `@info` rather than failing.
 
+Iteration counts and `C2PResult` are never compared across platforms, only
+values: a state near a decision boundary legitimately takes a different path.
+
 ### Static analysis
 
 `Aqua` covers what unit tests structurally cannot — a declared but unused
-dependency, a missing compat bound, a stale export, a method ambiguity. It is
-how the unused `PrecompileTools` entry was eventually found, and it now runs in
-the suite so the next one is found immediately.
+dependency, a missing compat bound, a stale export, a method ambiguity. It
+runs in the suite so that the next such problem is found immediately (for the
+one that was found late, see [HISTORY](HISTORY.md#static-analysis)).
 
 `JET` asserts the property the GPU path depends on and that `@allocated` can
 only measure indirectly: no runtime dispatch and no type instability anywhere in
@@ -288,9 +326,7 @@ GPU, where the kernel is compiled separately anyway.
 
 Measured by the scripts in `study/`, which are run by hand and are not part of
 the test suite; the numbers are on the "Precision and GPUs" documentation page
-(`docs/src/precision.md`). In short: Float64 is validated on CUDA (H200) with
-the device indistinguishable from the host; a Float32 table with Float64
-arithmetic is validated too; pure Float32 is usable with measured limits.
+(`docs/src/precision.md`), and summarized in [README § GPUs](README.md#gpus).
 
 What is easy to get wrong here:
 
@@ -303,8 +339,8 @@ What is easy to get wrong here:
   coefficients of size ~20. Device–host differences at Float32 are therefore
   ~1e-4, not ~1e-7, and are not a device defect.
 - **Products of two conserved quantities overflow Float32** (they reach 1e20
-  each). `seed_z_solve` did this until the study found it; keep such terms in
-  ratio form.
+  each); keep such terms in ratio form
+  ([HISTORY](HISTORY.md#precision-and-devices)).
 - **`con2prim_tol(Float32)` is measured**, at 512 eps, just above the Float32
   residual's noise floor. The generic 64-eps fallback was below it and made
   Newton stall.
@@ -322,20 +358,34 @@ Where the two can be compared, they agree.
 - Running both audit harnesses on the unrepaired LS220, with matched sampling
   and a 1e-3-perturbed warm start over 20,000 warm and 2,000 cold states: 0 warm
   failures each, 1 cold failure each, and density round-trip quantiles matching
-  to ~10% at the median, p99 and p99.9.
-- Both reproduce the documented accept-and-guard outlier tail on DD2. That is a
+  to ~10% at the median, p99 and p99.9:
+
+  | | C++ | Julia |
+  | --- | --- | --- |
+  | warm Newton / fallback / failed | 19964 / 36 / 0 | 19958 / 42 / 0 |
+  | cold failures | 1 | 1 |
+  | density round trip, median | 1.89e-13 | 1.97e-13 |
+  | p99 | 2.55e-09 | 2.43e-09 |
+  | p99.9 | 1.03e-08 | 1.05e-08 |
+
+  Matching the sampling matters: `con2prim_audit.cpp` uses 5%-per-side margins
+  on the density box and entropy window and perturbs the warm start by 1e-3.
+  Sampling the corners instead, or warm-starting from the exact truth, changes
+  the failure rate by more than an order of magnitude in either implementation.
+- Both reproduce the documented accept-and-guard outlier tail on DD2 — a
+  handful of states per 20,000 where the round trip is poor. That is a
   property of the tables, and a port showing *none* of them would be sampling
   differently rather than doing better. On DD2 the C++'s own worst warm density
   error is 1.6; this port's is 0.18.
 
 ## Open items
 
-- No golden-file cross-checks against `eos_test --csv`. The invariant and
+- **(open)** No golden-file cross-checks against `eos_test --csv`. The invariant and
   closed-form oracles turned out strong enough that this was never needed, but
   the check-class violation sets would be cheap and exact to compare.
 - Float32 derivative accuracy (`p`, `cs²`, `μ̃`) is limited by the
   representation — spline coefficients of `log10(ε + shift)` — not by the code.
   Storing the coefficients with a per-cell offset and recovering ε with `expm1`
-  could lift it (untested), at the cost of departing from the C++'s
+  could lift it (untested) **(open)**, at the cost of departing from the C++'s
   representation.
 - `check_table` is serial; see "Threading".
