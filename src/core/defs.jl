@@ -22,25 +22,33 @@ const FLAG_EXT_ρ_LOW    = UInt32(1) << 3   # point used the low-density extensi
 const FLAG_OOB_ρ_HIGH   = UInt32(1) << 4   # ρ above the table's high edge (no extension)
 const FLAG_MAXITER      = UInt32(1) << 5   # the inner T-solve hit its iteration cap
 
-# Bits 8-15: what the *policy layer* did to a state. Kept separate from the
+# Bits 8-16: what the *policy layer* did to a state. Kept separate from the
 # bits above so a caller can distinguish "the table extension was used" from
-# "the state was repaired or excised" by masking.
+# "the state was repaired or excised" by masking. Bit 16 was added after the
+# byte 8-15 filled up; the group is still contiguous.
 const FLAG_POL_ATMOSPHERE = UInt32(1) << 8    # whole state replaced by the atmosphere
 const FLAG_POL_CEILING    = UInt32(1) << 9    # a collapse ceiling was exceeded
 const FLAG_POL_S_FLOORED  = UInt32(1) << 10   # s raised to the physical srange minimum
 const FLAG_POL_S_CEILED   = UInt32(1) << 11   # s lowered to the physical srange maximum
 const FLAG_POL_W_CAPPED   = UInt32(1) << 12   # rapidity clamped into [0, w_cap]
-const FLAG_POL_ρ_CLAMPED  = UInt32(1) << 13   # ρ clamped without a full atmosphere reset
+const FLAG_POL_ρ_CEILED   = UInt32(1) << 13   # ρ lowered to ρ_ceiling: rest mass removed
 const FLAG_POL_YE_CLAMPED = UInt32(1) << 14   # Yₑ clamped into the table's range
 const FLAG_POL_NONFINITE  = UInt32(1) << 15   # non-finite (or D <= 0) input was seen
+const FLAG_POL_ρ_FLOORED  = UInt32(1) << 16   # ρ raised to ρ_atm without an atmosphere reset: rest mass added
+
+"""
+Either density clamp: `FLAG_POL_ρ_FLOORED | FLAG_POL_ρ_CEILED`. Two bits, so
+test it with `flags & FLAG_POL_ρ_CLAMPED != 0`, not with `==`.
+"""
+const FLAG_POL_ρ_CLAMPED = FLAG_POL_ρ_FLOORED | FLAG_POL_ρ_CEILED
 
 """
 Mask of every policy bit: `flags & FLAG_POL_ANY` answers "did the policy layer
 touch this point?" without enumerating the bits.
 """
 const FLAG_POL_ANY = FLAG_POL_ATMOSPHERE | FLAG_POL_CEILING | FLAG_POL_S_FLOORED |
-                     FLAG_POL_S_CEILED | FLAG_POL_W_CAPPED | FLAG_POL_ρ_CLAMPED |
-                     FLAG_POL_YE_CLAMPED | FLAG_POL_NONFINITE
+                     FLAG_POL_S_CEILED | FLAG_POL_W_CAPPED | FLAG_POL_ρ_CEILED |
+                     FLAG_POL_YE_CLAMPED | FLAG_POL_NONFINITE | FLAG_POL_ρ_FLOORED
 
 # ---------------------------------------------------------------------------
 # Outcome enums

@@ -229,7 +229,7 @@ function pol_project_core(eos::AbstractEOS{S}, pol::PolicyOptions{T}, in::PrimSt
 
     if ρ > ρ_hi
         ρ = ρ_hi
-        flags |= FLAG_POL_ρ_CLAMPED
+        flags |= FLAG_POL_ρ_CEILED
     end
     y_lo, y_hi = yₑ_bounds(eos)
     if yₑ < y_lo
@@ -438,6 +438,13 @@ merely plausible.
 input bit-identically. That flag word, not `base.result`, is the validity
 signal: the returned state is usable even when the solver reports a failure.
 
+`FLAG_POL_ρ_FLOORED` means the repair raised ρ to the atmosphere density
+without replacing the whole state, so the returned `cons.D` exceeds the input
+`D`: rest mass, and with it momentum, was added. A caller that would rather put
+such a point at rest has to do so itself. `FLAG_POL_ρ_CEILED` is the opposite
+case, with mass removed. Capping the rapidity raises ρ as well, but preserves
+`D`, and is reported only as `FLAG_POL_W_CAPPED`.
+
 Physics fidelity is explicitly not the goal in the excision regime. The point is
 to keep the evolution running with a state that is valid, however bad the
 physics has become.
@@ -514,12 +521,31 @@ function con2prim_safe(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOpt
     if isfinite(r_lo.f2) && r_lo.f2 > zero(T)
         # τ sits below the coldest state compatible with this momentum: floor
         # the entropy onto the physical minimum.
+        #
+        # The clamps on w and ρ here leave a state that `project_prim_state`
+        # finds already in range, so they have to report themselves. Raising ρ
+        # is the one that matters to a caller: ρ·cosh w then exceeds D, and the
+        # repair has added rest mass and momentum.
+        pf = FLAG_POL_S_FLOORED
         w_cap = pol_w_cap(pol)
-        w1 = isfinite(r_lo.w) ? clamp(r_lo.w, zero(T), w_cap) : zero(T)
-        ρ1 = clamp(in.D / cosh(w1), pol_ρ_atm(eos, pol), pol_ρ_ceiling(eos, pol))
+        w1 = zero(T)
+        if isfinite(r_lo.w)
+            w1 = clamp(r_lo.w, zero(T), w_cap)
+            w1 == r_lo.w || (pf |= FLAG_POL_W_CAPPED)
+        end
+        ρ_lo = pol_ρ_atm(eos, pol)
+        ρ_hi = pol_ρ_ceiling(eos, pol)
+        ρ1 = in.D / cosh(w1)
+        if ρ1 < ρ_lo
+            ρ1 = ρ_lo
+            pf |= FLAG_POL_ρ_FLOORED
+        elseif ρ1 > ρ_hi
+            ρ1 = ρ_hi
+            pf |= FLAG_POL_ρ_CEILED
+        end
         sr1 = srange(eos, ρ1, ye_c)
-        ps, pf = project_prim_state(eos, PrimState{T}(ρ1, sr1.s_min, ye_in, w1), pol)
-        pf |= FLAG_POL_S_FLOORED
+        ps, pf1 = project_prim_state(eos, PrimState{T}(ρ1, sr1.s_min, ye_in, w1), pol)
+        pf |= pf1
         nb, cons = pol_package(eos, ps, in.S_par, in.S_perp, B², r_lo.pt.u_solved)
         return Con2PrimSafeOut{T}(Con2PrimOut{T}(nb.ρ, nb.s, nb.ye, nb.w, nb.W, nb.v_par, nb.v_perp,
                                                  nb.eos, res, it_n, it_f, nb.flags), cons, pf, true)

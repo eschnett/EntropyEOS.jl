@@ -12,6 +12,7 @@ the method. How the design got here is in [HISTORY.md](HISTORY.md).
 - [Layout](#layout)
 - [Data model and units](#data-model-and-units)
 - [Type design](#type-design)
+- [State policy flags](#state-policy-flags)
 - [Discipline in `core/`](#discipline-in-core)
 - [Deliberate deviations from the C++](#deliberate-deviations-from-the-c)
 - [Threading](#threading)
@@ -156,6 +157,37 @@ KernelAbstractions uses — verified by reading its `argconvert`, and then by
 running `evaluate` and `con2prim` as KA kernels on a Metal GPU. Narrowing the
 scalar type is a separate explicit step (`narrow`), because a device hop must
 never change precision silently.
+
+## State policy flags
+
+`con2prim_safe` and `project_prim_state` report each repair as a bit in
+`policy_flags` rather than leaving the caller to infer it from the returned
+state. Every clamp sets its own bit, including those that leave a state the
+following projection finds already in range. The bit values are the same as in
+the C++.
+
+| bit | flag | the repair |
+| --- | --- | --- |
+| 8 | `FLAG_POL_ATMOSPHERE` | replaced the whole state by the atmosphere at rest |
+| 9 | `FLAG_POL_CEILING` | hit a collapse ceiling, then excised or projected onto the ceiling |
+| 10, 11 | `FLAG_POL_S_FLOORED`, `_S_CEILED` | moved s onto the physical entropy window |
+| 12 | `FLAG_POL_W_CAPPED` | clamped w into `[0, w_cap]`, preserving D |
+| 13 | `FLAG_POL_ρ_CEILED` | lowered ρ to ρ_ceiling: rest mass removed |
+| 14 | `FLAG_POL_YE_CLAMPED` | clamped Yₑ into the table |
+| 15 | `FLAG_POL_NONFINITE` | saw non-finite input or D ≤ 0 (with `ATMOSPHERE`) |
+| 16 | `FLAG_POL_ρ_FLOORED` | raised ρ to ρ_atm without an atmosphere reset: rest mass added |
+
+`FLAG_POL_ρ_CLAMPED` is the two-bit mask `ρ_FLOORED | ρ_CEILED`, and
+`FLAG_POL_ANY` covers bits 8–16. Bits 6–7 stay reserved for solver flags, which
+is why the newest policy bit is 16.
+
+`ρ_FLOORED` is the signal a hydro code may need to act on. It arises in the
+entropy-floor repair, which keeps the inner solve's rapidity: for a thin, fast
+state `D/cosh w` falls below ρ_atm, the density is raised, and the returned
+conservatives carry more mass *and* more momentum than the input. Whether such a
+point should also be put at rest is left to the caller, since it depends on the
+evolution scheme (TreeGRRMHD does reset it). A rapidity cap also raises ρ, as
+D/cosh(w_cap), but preserves D, so it does not set `ρ_FLOORED`.
 
 ## Discipline in `core/`
 
