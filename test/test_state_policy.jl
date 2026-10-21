@@ -145,9 +145,73 @@
         cin = Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²)
         out = con2prim_safe(v, cin, opts, tight)
         @test out.policy_flags & FLAG_POL_W_CAPPED != 0
+        # ρ went up, but D did not: that is not a density floor.
+        @test out.policy_flags & FLAG_POL_ρ_CLAMPED == 0
         @test out.base.w ≈ 0.5
         @test out.base.ρ ≈ cin.D / cosh(0.5) rtol = 1e-14
         @test out.cons.D ≈ cin.D rtol = 1e-12
+    end
+
+    @testset "density clamps in the entropy-floor branch are reported" begin
+        # A cold, fast, thin state with too little energy for its momentum is
+        # repaired by the entropy floor at the inner solve's own w. With D only
+        # a little above the atmosphere trigger, D/cosh(w) falls below ρ_atm, so
+        # the repair raises ρ and adds rest mass. Before the flag existed this
+        # came back as S_FLOORED alone.
+        ρa = E.pol_ρ_atm(v, pol)
+        D = 1.5ρa
+        w = 2.0
+        sr = srange(v, exp10(v.x_lo), yₑ0)
+        c = prim2con(v, D / cosh(w), sr.s_min, yₑ0, w, 0.0, 0.0, NaN)
+        cin = Con2PrimIn(D, c.τ * 1e-3, yₑ0 * D, c.S_par, c.S_perp, 0.0)
+        out = con2prim_safe(v, cin, opts, pol)
+        @test out.policy_flags & FLAG_POL_S_FLOORED != 0
+        @test out.policy_flags & FLAG_POL_ρ_CLAMPED == FLAG_POL_ρ_FLOORED
+        @test out.policy_flags & FLAG_POL_ATMOSPHERE == 0
+        @test out.base.ρ == ρa
+        @test out.base.w > 0                 # the velocity is kept; resetting it is the caller's call
+        @test out.cons.D > cin.D
+        @test accept(out)
+
+        # The ceiling side of the same clamp, with the collapse bounds off so
+        # that the state reaches the entropy floor at all.
+        polc = PolicyOptions(; ρ_atm=pol.ρ_atm, ρ_ceiling=1e9, w_cap=pol.w_cap)
+        D = 1e10
+        sr = srange(v, D / cosh(w), yₑ0)
+        c = prim2con(v, D / cosh(w), sr.s_min, yₑ0, w, 0.0, 0.0, NaN)
+        cin = Con2PrimIn(D, c.τ * 1e-3, yₑ0 * D, c.S_par, c.S_perp, 0.0)
+        out = con2prim_safe(v, cin, opts, polc)
+        @test out.policy_flags & FLAG_POL_S_FLOORED != 0
+        @test out.policy_flags & FLAG_POL_ρ_CLAMPED == FLAG_POL_ρ_CEILED
+        @test out.base.ρ == 1e9
+        @test out.cons.D < cin.D
+
+        # And the rapidity clamp of that branch.
+        w = 1.2pol.w_cap
+        D = 1e3ρa
+        c = prim2con(v, D / cosh(w), srange(v, D / cosh(w), yₑ0).s_min, yₑ0, w, 0.0, 0.0, NaN)
+        cin = Con2PrimIn(D, c.τ * 1e-3, yₑ0 * D, c.S_par, c.S_perp, 0.0)
+        out = con2prim_safe(v, cin, opts, pol)
+        @test out.policy_flags & FLAG_POL_S_FLOORED != 0
+        @test out.policy_flags & FLAG_POL_W_CAPPED != 0
+        @test out.base.w == pol.w_cap
+
+        # Over a batch: the floor flag is set exactly when D went up.
+        rng = StableRNG(17)
+        nfloored = 0
+        for _ in 1:200
+            w = 4rand(rng)
+            D = ρa * exp10(2rand(rng))
+            ρ = D / cosh(w)
+            sr = srange(v, max(ρ, exp10(v.x_lo)), yₑ0)
+            c = prim2con(v, ρ, sr.s_min + rand(rng) * (sr.s_max - sr.s_min), yₑ0, w, 0.0, 0.0, NaN)
+            cin = Con2PrimIn(D, c.τ * exp10(-1 - 6rand(rng)), yₑ0 * D, c.S_par, c.S_perp, 0.0)
+            out = con2prim_safe(v, cin, opts, pol)
+            floored = out.policy_flags & FLAG_POL_ρ_FLOORED != 0
+            nfloored += floored
+            @test floored == (out.cons.D > cin.D * (1 + 1e-12))
+        end
+        @test 0 < nfloored < 200             # both outcomes are exercised
     end
 
     @testset "check and project agree, and projection is idempotent" begin
@@ -180,7 +244,8 @@
         srm = srange(v, ρmid, 0.35)
         smid = 0.5 * (srm.s_min + srm.s_max)
         @test check_prim_state(v, PrimState(ρmid, smid, 0.35, 0.5), pol) == 0
-        @test check_prim_state(v, PrimState(ρmid * 1e9, smid, 0.35, 0.5), pol) & FLAG_POL_ρ_CLAMPED != 0
+        @test check_prim_state(v, PrimState(ρmid * 1e9, smid, 0.35, 0.5), pol) & FLAG_POL_ρ_CLAMPED ==
+              FLAG_POL_ρ_CEILED
         @test check_prim_state(v, PrimState(ρmid, smid, v.y_hi + 0.2, 0.5), pol) & FLAG_POL_YE_CLAMPED != 0
         @test check_prim_state(v, PrimState(ρmid, srm.s_min - 5, 0.35, 0.5), pol) & FLAG_POL_S_FLOORED != 0
         @test check_prim_state(v, PrimState(ρmid, srm.s_max + 5, 0.35, 0.5), pol) & FLAG_POL_S_CEILED != 0
