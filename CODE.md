@@ -336,22 +336,28 @@ states inside the other faces.
   negative; (c) DD2's and SFHo's cold edge at ρ ≈ 10⁹–10¹¹ and Yₑ ≈ 0.27–0.33,
   where s_min(ρ) dips below zero and h along the edge is not monotone.
 
-(a) and (b) are table defects: monotonicity at fixed s needs cs² < 1, so the
-solve at fixed s has the same multiple roots there (see
-[Open items](#open-items)). Only (c), at most 0.4% of
-states, comes from the edge's density dependence. Which root to return where
-there are several, and whether a bracket collapsed around (c)'s jump counts as
-a root, is **(open)**: the one the bracketed find reaches, which is
-deterministic, or a rule such as the highest density. Either has to keep the
-output a fixed point.
+(a) and (b) are table defects. At a root of φ, `residuals`' z_w =
+z·(1 − cs²)·tanh w gives dφ/dw·cosh² w ≥ 1 − cs²·tanh² w for any B², so at
+fixed s every crossing rises, and the root is unique, wherever cs²·v² < 1. The
+solve at fixed s has the same multiple roots there (see [Open items](#open-items)),
+and they need fast flow through an acausal part of the table. Only (c), at most
+0.4% of states, comes from the edge's density dependence.
+
+Where φ has several roots, the face find returns whichever root its bracketed
+find reaches, as `inner_solve_w` does. No rule picks among them: one was
+measured and rejected ([HISTORY](HISTORY.md#state-policy-flags)), and the
+fixed-point invariant below does not need it.
 
 The contract is a set of invariants:
 
 - a set face flag means that face was active, and level 1's returned state lies
   on it, to the slack;
 - `policy_flags == 0` means `cons` is the input bit for bit, as today;
-- every output is a fixed point: fed back, it returns flags 0 and, by the
-  previous invariant, the same state bit for bit;
+- every output is a fixed point: fed back with its own primitives as the
+  guess, it returns flags 0 and, by the previous invariant, the same state bit
+  for bit. `con2prim` tests convergence at its guess before iterating, so this
+  holds whichever root the output is on; without a guess it holds where the root
+  is unique;
 - `check_con_state` never reports a face that `con2prim_safe` does not set. Its
   cheap mode stays arithmetic, and each of its tests is sufficient: non-finite
   input, D < ρ_min, D > ρ_max·cosh(w_cap), and Yₑ out of range. With
@@ -634,11 +640,16 @@ Where the two can be compared, they agree.
   representation.
 - `check_table` is serial; see "Threading".
 - `inner_solve_w`'s docstring claims a unique root at fixed s. That needs
-  cs² < 1, which the real tables violate in places: at the top of LS220, SRO
-  LS220 and SFHo (cs² up to 1.14), and on DD2's and SFHo's hottest edge near
-  ρ ≈ 10⁷ (cs² 5–6, or negative). There the inner solve can have several roots
-  and returns whichever it reaches (measured by `study/projection_faces.jl`,
-  2026-10-22).
+  cs²·v² < 1 along the path, which the real tables violate in places: every one
+  has cs² > 1 near its top density, at all temperatures (LS220 1.3–1.4, DD2
+  just above 1), and DD2 and SFHo have spikes at their hottest edge (cs² 4.3 at
+  ρ ≈ 10⁷ in DD2, 1.17 within ~0.01 in log T of T_max at ρ ≈ 5·10¹²). There the
+  inner solve can have
+  several roots, in 0–3.7% of states sampled with w uniform in [0, 4], and
+  returns whichever it reaches; for 0.35–1.5% the sampled root is not the
+  lowest (measured by `study/projection_faces.jl` and
+  `study/root_certificate.jl`, 2026-10-22). A causally repaired table would
+  remove this; table repair is out of scope ([Scope](#scope)).
 - **(proposed)** Splitting `con2prim_safe` into a projection that reports faces
   and a separate, replaceable physics layer; see
   [Two-level projection](#two-level-projection-proposed).

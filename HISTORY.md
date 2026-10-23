@@ -77,6 +77,30 @@ since f₁ is not monotone where V > 1, and the s faces are diagnosed only below
 measurement also found that `inner_solve_w`'s unique root at fixed s does not
 hold where a table has cs² ≥ 1.
 
+For where a face has several roots, a rule was decided the same day and then
+withdrawn: return the lowest w at which φ rises through zero, in the face find
+and `inner_solve_w` alike, so that the answer depends on the state alone.
+Finding the lowest root needs a scan, so it needed a cheap test for where
+several roots are possible. One was found (`study/root_certificate.jl`): every
+crossing rises wherever cs²·tanh² w < 1, and a per-table bound on cs² per cell
+of (log ρ, Yₑ), about 1,700 numbers, certified 74–94% of sampled states (95–99.7%
+at W < 2) with no false certificate, once it sampled the temperature seams
+densely. Still, the rule was rejected as not worth it: several roots occur in
+0–3.7% of states, mostly fast flow through acausal parts of the tables; it would
+have needed the bound array, a scan, and an undesigned re-solve; and for
+0.35–1.5% of valid states it would have returned another state than the one
+whose conservatives went in, where a warm-started solve stays on its branch.
+The fixed-point invariant, which motivated it, holds without it once stated
+with the output as the guess. Considered and rejected along the way:
+
+- the root closest in τ, the one conservative a face frees: it needs τ at every
+  root, and it picks differently on the two faces;
+- the root nearest the pre-projection w: after a failed solve it depends on that
+  solve's history;
+- replacing each s face by a monotone envelope of its isotherm, which would
+  remove region (c)'s extra roots by construction: too much machinery (a
+  precomputed window, a policy window separate from `srange`) for an edge case.
+
 ## Discipline in `core/`
 
 ### The one stack buffer
