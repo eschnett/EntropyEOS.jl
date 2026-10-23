@@ -9,6 +9,7 @@ recorded each item in the documentation.
 - [State policy flags](#state-policy-flags)
 - [Discipline in `core/`](#discipline-in-core)
   - [The one stack buffer](#the-one-stack-buffer)
+- [Deliberate deviations from the C++](#deliberate-deviations-from-the-c)
 - [Testing](#testing)
   - [Static analysis](#static-analysis)
 - [Precision and devices](#precision-and-devices)
@@ -122,6 +123,68 @@ possible remedy, untested.
 
 2026-09-23. The `MVector{33,T}` buffer in `bracket_scan` was the design's
 biggest open risk; it is resolved by the kernel compiling and running on Metal.
+
+## Deliberate deviations from the C++
+
+2026-10-23. Fixed cold `con2prim` failing on states on an edge of the entropy
+window. The two-level projection's `study/cold_resolve.jl` found it: 43 of 49
+projected outputs that a cold re-solve flagged were states put at rest at ρ_min
+on the s_max face, reported as `failed_no_bracket` although the best iterate
+returned was the state itself. It is not specific to the projection: on the
+synthetic table, cold solves at rest on either edge failed 14 of 120 times
+(22 of 50 at ρ_min), and 3 of 120 at w = 1e-3. The C++, run on the same
+states, fails 17 and 2: the same defect. The analytic EOSs, which have no
+iterative T-solve, never failed.
+
+The suspected cause, a singular Newton Jacobian at w = 0, was wrong: the
+determinant there is −0.43. Newton stalled because the T-solve returned a warm
+start unchanged whenever it was within its residual tolerance, 1e-12·|s|. That
+leaked up to 2.4e-12 into U, and some 20 times con2prim's tolerance into the
+energy residual, so Newton's small steps in s left the residual frozen just
+above its tolerance; at random interior states this sent 2% of cold solves to
+the fallback. The fallback then failed because `bracket_scan` emits `s_phys_lo`
+and `s_phys_hi` twice. With the root on an edge, the two copies' solves differed
+only in warm start, could disagree in sign, and that empty pair won, since its
+midpoint is the anchor; re-solving both ends from one warm start found no sign
+change. 171 of 360 scans at edge states returned such a pair.
+
+Three changes, all in `core/`
+([CODE.md](CODE.md#deliberate-deviations-from-the-c)): a final Newton step in
+the T-solve, skipping empty pairs in the scan, and accepting an endpoint within
+tolerance as a bracket. The T-solve step alone removes every failure and every
+fallback in the samples below; the other two harden the fallback, which on the
+same edge states, with the Newton disabled and a perturbed warm start, now
+fails 5 of 960 instead of 22. That remainder is a resolution floor, recorded
+under [CODE.md § Open items](CODE.md#open-items).
+
+| synthetic table, cold | before | after |
+| --- | --- | --- |
+| at rest on an edge, failed / fallback | 14 / 49 of 120 | 0 / 0 |
+| w = 1e-3 on an edge, failed / fallback | 3 / 66 of 120 | 0 / 0 |
+| random states, fallback | 44 of 2000 | 0 |
+| random states warm, fallback | 2 of 2000 | 0 |
+
+On the real tables no edge state failed before or after; there the change shows
+as fewer fallbacks. With the audit's sampling (20,000 warm, 2,000 cold, a
+separate harness and seed, so its quantiles do not reproduce the
+[validation table](CODE.md#validation-against-the-c)'s):
+
+| warm Newton / fallback / failed | before | after |
+| --- | --- | --- |
+| LS220 | 19950 / 50 / 0 | 20000 / 0 / 0 |
+| SRO LS220 | 19949 / 51 / 0 | 20000 / 0 / 0 |
+| DD2 | 19932 / 64 / 4 | 19978 / 18 / 4 |
+| SFHo | 19925 / 74 / 1 | 19977 / 21 / 2 |
+
+Cold failures were unchanged (LS220 1, SRO LS220 2, others 0), cold fallbacks
+fell from 8–26 to 0–20, and the density round trip's medians and p99s moved by
+less than 10%. Of the tails only SFHo's moved more, and down: p99.9 from 9.0e-9
+to 6.5e-9, maximum from 0.26 to 0.15.
+
+Rejected: tightening `tsolve_residual_tol` instead, which buys the same
+accuracy with extra T-solve iterations on every hot-path `evaluate`, where the
+final step costs none; and removing the duplicate candidates at emission, which
+changes the scan's measured sampling where skipping empty pairs does not.
 
 ## Testing
 

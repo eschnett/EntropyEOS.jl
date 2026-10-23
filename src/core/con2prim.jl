@@ -427,9 +427,17 @@ function bracket_scan(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_per
 
         # Take the first sign-changing pair whose midpoint is closest to s_in:
         # simple and deterministic.
+        #
+        # A pair of equal entropies brackets nothing, but occurs routinely:
+        # the uniform half's endpoints duplicate s_phys_lo and s_phys_hi, and
+        # the ladder clamps onto the extended edges. When the root sits on such
+        # a candidate -- a state on an edge of the physical window -- the two
+        # copies' solves differ only by their warm starts, can disagree in
+        # sign, and the pair's midpoint is then exactly s_in, so it would win.
         pick = 0
         best_dist = zero(T)
         for i in 1:(nc - 1)
+            s_cand[i] < s_cand[i + 1] || continue
             glo, ghi = g_cand[i], g_cand[i + 1]
             ((glo <= 0 && ghi >= 0) || (glo >= 0 && ghi <= 0)) || continue
             dist = abs(T(0.5) * (s_cand[i] + s_cand[i + 1]) - s_in)
@@ -750,12 +758,16 @@ function con2prim(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{
 
     slo, shi = scan.s_lo, scan.s_hi
     glo, ghi = r_lo.f2, r_hi.f2
-    bracketed = (glo <= 0 && ghi >= 0) || (glo >= 0 && ghi <= 0)
+    # An endpoint that is already a root is a bracket, whatever the other
+    # endpoint's sign. It is also exactly the endpoint whose sign the fresh warm
+    # start is most likely to flip.
+    bracketed = (glo <= 0 && ghi >= 0) || (glo >= 0 && ghi <= 0) || abs(glo) <= opts.tol || abs(ghi) <= opts.tol
 
     if !bracketed
-        # Extremely rare, and guarded defensively: both solves are full
-        # precision, so this would mean the fresh warm start landed on a
-        # genuinely different outer function.
+        # Rare. Either the fresh warm start landed on a genuinely different
+        # outer function, or an endpoint is a root whose residual sits at the
+        # energy residual's resolution floor, above the tolerance, and flipped
+        # sign; see CODE.md, "Open items".
         best = abs(glo) <= abs(ghi) ? r_lo : r_hi
         rep = scaled_norm(r_best) < scaled_norm(best) ? r_best : best
         return fill_out(rep, yₑ, C2PResult.failed_no_bracket, iters, Int32(0))

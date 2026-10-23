@@ -627,6 +627,18 @@ function evaluate(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where
             g < zero(T) ? (lo = uu) : (hi = uu)
 
             if abs(g) <= tsolve_residual_tol(T) * s_scale
+                # Take the Newton step the residual already pays for. The
+                # tolerance admits an entropy error of 1e-12·|s|, which is a
+                # relative error in U some 20 times above con2prim's own
+                # tolerance; a warm start that already sits inside it would
+                # otherwise come back unchanged, so the solver's outer
+                # residual would depend on the warm start rather than on s
+                # alone. One step makes that error quadratic, and is free:
+                # eval_at samples at the final u anyway.
+                if e.fu > zero(T)
+                    u_pol = uu - g / e.fu
+                    lo < u_pol < hi && (uu = u_pol)
+                end
                 converged = true
                 break
             end

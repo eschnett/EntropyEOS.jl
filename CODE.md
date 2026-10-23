@@ -464,6 +464,28 @@ C++ artifact into Julia for no benefit.
 | out-parameters (`int &iters_out`, `real S_out[3]`) | extra tuple return values | tuples of isbits values return in registers |
 | `detail::` namespace and `aeval_`/`c2p_`/`pol_` prefixes | descriptive unexported names | one module namespace, no collisions with Base |
 
+Three numerical changes fix defects that the C++ shares. Together they made cold
+solves of states on an edge of the entropy window converge, where the C++ fails
+17 of 120 such states at rest on the synthetic table
+([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)):
+
+- **The T-solve ends with a Newton step.** When `evaluate`'s residual test
+  passes, it still takes the step that residual implies, if the step stays in
+  the bracket. The test admits an entropy error of 1e-12·|s|, which is a
+  relative error in U some 20 times con2prim's tolerance, and a warm start
+  already within it used to come back unchanged. The energy residual then
+  depended on the warm start and not only on s: Newton stalled just above its
+  tolerance, and at a root the residual's sign was noise. The step costs no
+  evaluation, because `eval_at` samples at the final u anyway, and it brings
+  the warm start's effect on U down to a few units in the last place.
+- **`bracket_scan` skips pairs of equal entropy.** Its uniform half's endpoints
+  duplicate `s_phys_lo` and `s_phys_hi`. With the root on an edge, the two
+  copies' solves could disagree in sign, and that empty pair, whose midpoint
+  is the anchor itself, was the one picked.
+- **An endpoint within tolerance is a bracket.** After the fallback re-solves
+  the scan's interval, an endpoint whose residual meets the tolerance no longer
+  fails the sign test.
+
 Everything else follows the C++ decision for decision, including the parts that
 look wrong until you read why: the Newton step is clamped and taken
 unconditionally rather than backtracked, convergence is tested on the
@@ -635,6 +657,11 @@ Where the two can be compared, they agree.
   | p99 | 2.55e-09 | 2.43e-09 |
   | p99.9 | 1.03e-08 | 1.05e-08 |
 
+  This table predates the [numerical deviations](#deliberate-deviations-from-the-c),
+  when the two ran the same algorithm. With them, Julia's warm fallbacks on
+  LS220 drop to 0 and its cold failure and quantiles stay put, so the warm row
+  no longer matches the C++'s (measured in
+  [HISTORY](HISTORY.md#deliberate-deviations-from-the-c)).
   Matching the sampling matters: `con2prim_audit.cpp` uses 5%-per-side margins
   on the density box and entropy window and perturbs the warm start by 1e-3.
   Sampling the corners instead, or warm-starting from the exact truth, changes
@@ -673,6 +700,18 @@ Where the two can be compared, they agree.
   not proposed: on the failure path only, follow each root through an ordered
   sweep in s, seeding every inner solve from its neighbour, and diagnose and
   solve on those roots.
+- **(open)** On a table's cold edge the energy residual cannot always meet the
+  tolerance. `eval_at` forms U as (1 + Û)/κ − 1, so U is resolved to
+  eps(1 + U) absolutely, and at rest f₂ to about eps/U: 1.2e-12 on the
+  synthetic table's coldest states, where U ≈ 2e-4, against a tolerance of
+  1e-12. Newton converges on every such state sampled, but the fallback
+  re-solves its interval's ends from a fresh warm start, which can flip the sign
+  of a residual at that floor, and a state whose root is that end then fails as
+  `failed_no_bracket`. With the Newton disabled and the warm start perturbed,
+  5 of 960 states on the edges of the window fail this way (22 before the
+  [deviations](#deliberate-deviations-from-the-c) of 2026-10-23). Two possible
+  remedies, both untested: a tolerance with a floor of a few eps·z/τ, or a scan
+  that returns its ends' warm starts so that the re-solve reproduces them.
 - **(proposed)** Splitting `con2prim_safe` into a projection that reports faces
   and a separate, replaceable physics layer; see
   [Two-level projection](#two-level-projection-proposed).
