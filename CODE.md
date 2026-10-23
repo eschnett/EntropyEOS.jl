@@ -13,6 +13,7 @@ the method. How the design got here is in [HISTORY.md](HISTORY.md).
 - [Data model and units](#data-model-and-units)
 - [Type design](#type-design)
 - [State policy flags](#state-policy-flags)
+  - [Two-level projection (proposed)](#two-level-projection-proposed)
 - [Discipline in `core/`](#discipline-in-core)
 - [Deliberate deviations from the C++](#deliberate-deviations-from-the-c)
 - [Threading](#threading)
@@ -188,6 +189,123 @@ conservatives carry more mass *and* more momentum than the input. Whether such a
 point should also be put at rest is left to the caller, since it depends on the
 evolution scheme (TreeGRRMHD does reset it). A rapidity cap also raises ρ, as
 D/cosh(w_cap), but preserves D, so it does not set `ρ_FLOORED`.
+
+### Two-level projection (proposed)
+
+*Proposed 2026-10-22, not decided. It would replace the policy described above,
+and be a breaking change (2.0.0).*
+
+**Why.** `con2prim_safe` today does two jobs at once: it projects a state onto
+the valid range, which is mechanics, and decides what a state should become —
+the atmosphere, the collapse ceiling — which is physics and depends on the
+evolution scheme. Mixing them has costs. The flags report facts for some repairs
+and decisions for others. An energy above the hottest state is treated as a
+collapse and written at ρ_ceiling even for a hot near-vacuum cell, which blew up
+TreeGRRMHD's magnetized atmosphere tubes. An atmosphere reset discards the
+clamps that preceded it. And the policy carries options (`collapse_to_atmosphere`,
+`atm_trigger`, `s_atm`, `ye_atm`, `τ_max`) that only one of the two jobs needs.
+The proposal separates them.
+
+**Level 1: projection.** `con2prim_safe` returns the valid state closest to the
+input and flags each face of the valid range that was active. It never replaces
+a state by the atmosphere and has no notion of collapse. The valid range is
+
+- ρ ∈ [ρ_min, ρ_max] (today ρ_atm and ρ_ceiling),
+- Yₑ ∈ [y_lo, y_hi], the table's range,
+- s ∈ [s_min(ρ, Yₑ), s_max(ρ, Yₑ)], the physical window,
+- w ∈ [0, w_cap].
+
+That is seven faces. w ≥ 0 is not one, since w is a magnitude and the direction
+is carried separately. The two Yₑ faces share a bit; the returned Yₑ says which.
+
+"Closest" has no metric: D, S and τ have different units, and a priority order
+does not work either (keeping D at the density ceiling would mean raising w,
+creating momentum). Instead each face has a rule. Change as little as possible,
+and prefer removing over adding:
+
+| face | flag | what gives way |
+| --- | --- | --- |
+| s_max | `S_CEILED` | τ lowered |
+| s_min | `S_FLOORED` | τ raised (unavoidable) |
+| w_cap | `W_CAPPED` | S lowered, D kept |
+| ρ_max | `ρ_CEILED` | D lowered |
+| ρ_min, with D ≥ ρ_min | `ρ_FLOORED` | S lowered: w reduced to acosh(D/ρ_min), D kept |
+| ρ_min, with D < ρ_min | `ρ_FLOORED` | D raised to ρ_min·cosh w, w from S at ρ_min |
+| y_lo, y_hi | `YE_CLAMPED` | D_Y set to Yₑ·D with Yₑ clamped |
+
+Quantities a row does not name are kept, to the solver's tolerance. Yₑ is kept
+when D changes, so D_Y moves with D: matter added or removed has the cell's
+composition ([HISTORY](HISTORY.md#state-policy-flags) has the rejected
+alternative). Two rows differ from 1.1.0: at the ρ_min face a state with
+D ≥ ρ_min is slowed down rather than given mass, and an energy above the hottest
+state keeps D and S and lowers τ rather than going to ρ_max. With D < ρ_min,
+whether w should keep S (as above) or be set to zero, which adds less mass,
+is **(open)**.
+
+Two outcomes are not projections, and get a bit of their own:
+
+- `NONFINITE`: a non-finite input, or D ≤ 0, where Yₑ = D_Y/D is undefined. There
+  is no closest valid state.
+- `NOT_CONVERGED` (new, bit 17): the solve failed but the diagnosis finds a valid
+  state inside the range, so there is nothing to project onto.
+
+Both return a fixed valid state (ρ_min, at rest, the middles of the Yₑ range and
+the entropy window) only so that a kernel never propagates NaN. Level 2 is
+expected to replace it, so it takes no parameter.
+
+The faces interact: the entropy window depends on ρ, ρ = D/cosh w, and w follows
+from S through h, which depends on s. Only Yₑ decouples, and is clamped first.
+The rest is an active-set problem: solve with no face active, add the violated
+face, re-solve in the remaining unknowns, repeat. The s-face solve is a root find
+in w with f₁(w) = 0 at s = s_edge(D/cosh w), consistent with the window at the
+density actually written (TreeGRRMHD's EOS-9 measured that the current
+endpoint solves, taken at the window of the failed solve's density, miss the
+written state's window by up to 0.27 of its width). That this terminates with a
+unique answer rests on f₁ being monotone in w along a face and f₂ monotone in s,
+measured only on the synthetic table so far **(open)**; the real tables, whose
+windows are less smooth, are where it has to be shown.
+
+The contract is a set of invariants:
+
+- a set flag means that face was active, and the returned state lies on it;
+- `policy_flags == 0` means `cons` is the input bit for bit, as today;
+- every output is a fixed point: fed back, it returns flags 0 and the same state;
+- `check_con_state` predicts the faces, sharing the diagnosis routine with
+  `con2prim_safe`. Its cheap mode stays arithmetic: non-finite input, D < ρ_min,
+  D > ρ_max·cosh(w_cap), and Yₑ out of range.
+
+`project_prim_state` is the same projection on primitives, where every face is a
+plain clamp.
+
+**Level 2: the application's physics.** A separate kernel-side function takes the
+input conservatives, level 1's output and flags, and a level-2 policy, and may
+replace the state by another valid one. It needs no further flags: it can
+compute ΔD, ΔS and Δτ from the two conservative states. EntropyEOS ships a
+reference implementation that reproduces today's behaviour:
+
+- `ρ_FLOORED`, or D < `atm_trigger`·ρ_min: the atmosphere at rest, at ρ_min, with
+  `s_atm` and `ye_atm`; sets `ATMOSPHERE`;
+- `ρ_CEILED` with `collapse_to_atmosphere`: the atmosphere; sets `CEILING`;
+- `NONFINITE` and `NOT_CONVERGED`: the atmosphere.
+
+An application with its own rules (TreeGRRMHD puts any state with added rest
+mass at rest) replaces this function rather than configuring it.
+
+**What moves.** Level 1's policy keeps ρ_min, ρ_max and w_cap. `s_atm`, `ye_atm`,
+`atm_trigger` and `collapse_to_atmosphere` move to level 2's. `D_max` and
+`τ_max` go: the cheap check computes ρ_max·cosh(w_cap) itself, and τ no longer
+short-circuits the solve (`τ_max` came from a 5×3 grid and stopped states the
+table represents). Bits 10–14 and 16 keep their numbers with the meaning "face";
+`ATMOSPHERE` and `CEILING` become level-2 bits; `NONFINITE` stays at level 1.
+
+**Consequences.** Outputs and flags change for existing inputs, and
+`PolicyOptions` loses fields: 2.0.0. It is a departure from the C++ beyond the
+table under [Deliberate deviations](#deliberate-deviations-from-the-c), so
+either the C++ follows, as it did for 1.1.0, or this becomes a section of its
+own there. TreeGRRMHD's EOS-9 request is largely subsumed: its edge-consistent
+root find, its guards on the endpoint solves, the shared diagnosis with
+`check_con_state`, and dropping the `τ_max` test carry over; its flag rules are
+replaced by the face flags.
 
 ## Discipline in `core/`
 
@@ -421,3 +539,6 @@ Where the two can be compared, they agree.
   could lift it (untested) **(open)**, at the cost of departing from the C++'s
   representation.
 - `check_table` is serial; see "Threading".
+- **(proposed)** Splitting `con2prim_safe` into a projection that reports faces
+  and a separate, replaceable physics layer; see
+  [Two-level projection](#two-level-projection-proposed).

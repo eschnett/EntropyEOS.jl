@@ -45,6 +45,14 @@ The same change was made in the C++. Version 1.1.0.
 Putting the point at rest inside EntropyEOS was considered and left to the
 caller, as it may be specific to one evolution scheme.
 
+2026-10-22. Proposed the
+[two-level projection](CODE.md#two-level-projection-proposed), prompted by
+TreeGRRMHD's request EOS-9 (hot states written at the collapse ceiling). Within
+it, keeping D_Y rather than Yₑ when D changes was considered: it would remove
+the need for any default Yₑ, even for D ≤ 0. Rejected, because it treats
+electrons and the implicit neutrons differently: matter added or removed would
+carry no electrons.
+
 ## Discipline in `core/`
 
 ### The one stack buffer
