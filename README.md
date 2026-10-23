@@ -1,7 +1,8 @@
 # EntropyEOS.jl
 
-* [![Documentation](https://img.shields.io/badge/Docs-Dev-blue.svg)](https://eschnett.github.io/EntropyEOS.jl/dev/)
-* [![GitHub CI](https://github.com/eschnett/EntropyEOS.jl/workflows/CI/badge.svg)](https://github.com/eschnett/EntropyEOS.jl/actions)
+* [![Documentation (stable)](https://img.shields.io/badge/Docs-Stable-blue.svg)](https://eschnett.github.io/EntropyEOS.jl/stable/)
+* [![Documentation (dev)](https://img.shields.io/badge/Docs-Dev-blue.svg)](https://eschnett.github.io/EntropyEOS.jl/dev/)
+* [![GitHub CI](https://github.com/eschnett/EntropyEOS.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/eschnett/EntropyEOS.jl/actions/workflows/CI.yml)
 * [![codecov](https://codecov.io/gh/eschnett/EntropyEOS.jl/graph/badge.svg?token=2Z29OBMVB6)](https://codecov.io/gh/eschnett/EntropyEOS.jl)
 
 Handling tabulated and analytic equations of state for general-relativistic hydrodynamics.
@@ -10,7 +11,8 @@ This is a Julia translation of the C++ library
 [EntropyEOS](https://github.com/eschnett/EntropyEOS), covering the run-time
 path a hydro code actually calls: loading a table, checking it, and using it.
 
-[CODE.md](CODE.md) describes how the package is built and why.
+The [documentation](https://eschnett.github.io/EntropyEOS.jl/stable/) has the API
+reference; [CODE.md](CODE.md) describes how the package is built and why.
 
 - [What it does](#what-it-does)
 - [Usage](#usage)
@@ -103,8 +105,9 @@ out = con2prim_safe(eos, cons, Con2PrimOptions(), default_policy(eos, 1e-10))
 ```
 
 Both are `isbits` and go into a GPU kernel as they are. They have κ = 1, so
-`ρ★ = ρ`, and the units are the caller's. The documentation's "Analytic EOSs"
-page covers choosing the entropy window, and gives an SLy example built from the
+`ρ★ = ρ`, and the units are the caller's. The documentation's
+["Analytic EOSs"](https://eschnett.github.io/EntropyEOS.jl/dev/analytic/) page
+covers choosing the entropy window, and gives an SLy example built from the
 paper's fits.
 
 ## GPUs
@@ -125,7 +128,8 @@ Float32. A Float32 table with Float64 arithmetic —
 `adapt(CuArray, EntropyEOS.narrow(v, Float32))`, called with `Float64`
 arguments — halves the table's memory at essentially no cost to `con2prim`.
 Pure Float32 is usable but has real accuracy limits; the documentation's
-"Precision and GPUs" page has the measurements. The GPU testset is described in
+["Precision and GPUs"](https://eschnett.github.io/EntropyEOS.jl/dev/precision/)
+page has the measurements. The GPU testset is described in
 [CODE.md § Testing](CODE.md#testing).
 
 ## Status
