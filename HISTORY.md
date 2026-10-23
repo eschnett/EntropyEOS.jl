@@ -101,6 +101,21 @@ with the output as the guess. Considered and rejected along the way:
   remove region (c)'s extra roots by construction: too much machinery (a
   precomputed window, a policy window separate from `srange`) for an edge case.
 
+2026-10-23. Decided that the C++ follows the two-level projection, as it did
+for 1.1.0.
+
+The same day, rejected a rescue for `NOT_CONVERGED`: a guarded bisection in s,
+bracketed by the diagnosis. Measured by `study/cold_failures.jl`, every cold
+failure on a valid state lies in region (a) or (b), where the inner root is not
+unique, and the bisection recovered none of them, because G jumps between
+roots. The measurement also showed that the endpoint diagnosis misclassifies
+most of these valid states, which qualifies the earlier finding that it is
+reliable. Since (a) and (b) are wrong physics, to be fixed by repairing the
+tables, this was accepted as a limitation rather than resolved. Leaning on warm
+starts was not an option: running without one is a design goal. A rescue that
+follows each root through an ordered sweep in s was considered and left as a
+possible remedy, untested.
+
 ## Discipline in `core/`
 
 ### The one stack buffer

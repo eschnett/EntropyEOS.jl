@@ -282,10 +282,9 @@ Two outcomes are not projections, and get a bit of their own:
 
 Both return a fixed valid state (ρ_min, at rest, the middles of the Yₑ range and
 the entropy window) only so that a kernel never propagates NaN. Level 2 is
-expected to replace it, so it takes no parameter. When `NOT_CONVERGED` is set the
-diagnosis has bracketed the root in s, so a guarded bisection could rescue the
-state instead. TreeGRRMHD's tubes never reached this case, so whether it is worth
-a solver is **(open)**, to be measured first.
+expected to replace it, so it takes no parameter. No rescue is attempted: the
+measured failures all lie where the inner root is not unique, and a bisection in
+s recovered none of them (see below).
 
 The faces interact: the entropy window depends on ρ, ρ = D/cosh w, and w follows
 from S through h, which depends on s. Only Yₑ decouples, and is clamped first.
@@ -315,9 +314,12 @@ states inside the other faces.
   state–face pairs, all in region (c) below. There the cold seam leaves ~10⁻⁸ of
   noise in φ, above the 10⁻¹² tolerance, and in one DD2 state φ jumps by 0.19
   across its sign change.
-- **The diagnosis is reliable.** G is non-monotone for 0–2.9% of states, by at
-  most 4·10⁻⁴ of its span, and in none of 49,305 cold or hot diagnoses does it
-  take the wrong sign anywhere in the window.
+- **The diagnosis is reliable where the inner root is unique.** G is
+  non-monotone for 0–2.9% of states, by at most 4·10⁻⁴ of its span, and in none
+  of 49,305 cold or hot diagnoses does it take the wrong sign anywhere in the
+  window. These inner solves were seeded from their neighbour in s, which keeps
+  them on one root; where there are several roots, a solve started elsewhere
+  can land on another (see below).
 - **The answer is not always unique.** The share of states where φ along a face
   is non-monotone, and where it has more than one root (ranges over mode and
   sampling):
@@ -348,10 +350,26 @@ find reaches, as `inner_solve_w` does. No rule picks among them: one was
 measured and rejected ([HISTORY](HISTORY.md#state-policy-flags)), and the
 fixed-point invariant below does not need it.
 
+Where the inner root is not unique, level 1 cannot keep its contract. A cold
+start there can fail, and the endpoint solves of the diagnosis can land on
+another root, so that f₂ has the wrong sign and a valid state is projected onto
+an s face. Measured on 2026-10-23 by `study/cold_failures.jl`: of 20,000 valid
+states per table (the sampling of `test/test_real_tables.jl`), a cold start
+failed on 9 (LS220), 16 (SRO LS220), 11 (DD2, either version) and 5 (SFHo), all
+in region (a) or (b); a warm start failed on 2, both DD2. Of these 41 cold
+failures (counting DD2 once), 1.1.0's diagnosis finds 29 outside the entropy
+window, 18 too hot and 11 too cold, and sends 12 to the atmosphere, which in
+this design would be `NOT_CONVERGED`. A bisection in s, bracketed by either
+window, recovered none, because G jumps between roots. Regions (a) and (b) are
+wrong physics, to be fixed by repairing the tables, so this is accepted as a
+limitation ([Open items](#open-items)). The invariants below hold where the
+inner root is unique. The tests check them on states that avoid (a) and (b), and
+check there only that the output is valid.
+
 The contract is a set of invariants:
 
 - a set face flag means that face was active, and level 1's returned state lies
-  on it, to the slack;
+  on it, to the slack (where the inner root is unique, as above);
 - `policy_flags == 0` means `cons` is the input bit for bit, as today;
 - every output is a fixed point: fed back with its own primitives as the
   guess, it returns flags 0 and, by the previous invariant, the same state bit
@@ -399,9 +417,8 @@ would say no more than `ATMOSPHERE | ρ_CEILED`.
 
 **Consequences.** Outputs and flags change for existing inputs, and
 `PolicyOptions` loses fields: 2.0.0. It is a departure from the C++ beyond the
-table under [Deliberate deviations](#deliberate-deviations-from-the-c). Whether
-the C++ follows, as it did for 1.1.0, or this becomes a section of its own there,
-is **(open)**. TreeGRRMHD's EOS-9 request is largely subsumed: its edge-consistent
+table under [Deliberate deviations](#deliberate-deviations-from-the-c), and the
+C++ follows, as it did for 1.1.0 (decided 2026-10-23). TreeGRRMHD's EOS-9 request is largely subsumed: its edge-consistent
 root find, its guards on the endpoint solves, the shared diagnosis with
 `check_con_state`, and dropping the `τ_max` test carry over. Its flag rules are
 replaced by the face flags, and its Q4 (an atmosphere carries only its cause) by
@@ -649,7 +666,13 @@ Where the two can be compared, they agree.
   returns whichever it reaches; for 0.35–1.5% the sampled root is not the
   lowest (measured by `study/projection_faces.jl` and
   `study/root_certificate.jl`, 2026-10-22). A causally repaired table would
-  remove this; table repair is out of scope ([Scope](#scope)).
+  remove this; table repair is out of scope ([Scope](#scope)). On a cold start
+  it makes the solve fail, or the policy's endpoint diagnosis misclassify a
+  valid state, in a few in 10,000 valid states
+  ([Two-level projection](#two-level-projection-proposed)). A possible remedy,
+  not proposed: on the failure path only, follow each root through an ordered
+  sweep in s, seeding every inner solve from its neighbour, and diagnose and
+  solve on those roots.
 - **(proposed)** Splitting `con2prim_safe` into a projection that reports faces
   and a separate, replaceable physics layer; see
   [Two-level projection](#two-level-projection-proposed).
