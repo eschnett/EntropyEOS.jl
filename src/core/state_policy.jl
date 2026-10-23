@@ -1,71 +1,90 @@
-# The invalid-state policy layer: a never-fails path on top of con2prim.
+# The state policy, in two levels: a projection onto the valid range, and the
+# application's physics on top of it.
 #
-# Translated from `entropy_eos/core/state_policy.hpp`.
+# This replaces the translation of `entropy_eos/core/state_policy.hpp` that
+# 1.x carried; the C++ follows this design (CODE.md, "State policy").
 #
-# The contract is that `con2prim_safe` never fails, for any input whatsoever --
-# non-finite garbage, a collapse state, a superluminal momentum demand, vacuum,
-# a τ below the coldest state the table can express. It returns a valid,
-# exactly solvable state plus flags saying what it did.
+# Level 1, `con2prim_safe`, never fails, for any input whatsoever -- non-finite
+# garbage, vacuum, a collapse state, a superluminal momentum demand, an energy
+# outside anything the table can express. It returns the valid state closest
+# to the input, by one rule per face of the valid range, and flags each face
+# that was active. It has no notion of an atmosphere or of collapse.
 #
-# Every repair goes through primitives: clamp (ρ, s, Yₑ, w) per policy, evaluate
-# the EOS, then run prim2con to regenerate the conservatives. τ and Sᵢ are never
-# hand-edited, so `con2prim(returned cons) == returned prims` holds by
-# construction rather than by hope.
+# Level 2, `apply_policy`, decides what a state should become. The reference
+# implementation replaces it by the atmosphere where 1.x did. An application
+# with its own rules replaces that function rather than configuring it.
 #
-# Physics fidelity is explicitly not a goal in the excision regime. The point is
-# to keep the evolution going with a state that is valid and exactly solvable,
-# however bad the physics has become.
+# Every output goes through primitives: the conservatives come back out of
+# `prim2con`, never edited by hand, so `con2prim(returned cons)` reproduces the
+# returned primitives by construction.
+
+"""
+    ProjectionOptions
+
+The valid range that `con2prim_safe` projects onto: `ρ ∈ [ρ_min, ρ_max]` and
+`w ≤ w_cap`, with `Yₑ` in the table's range and `s` in the physical window at
+`(ρ, Yₑ)`. Densities are κ-rescaled g/cm³, not raw table densities -- a common
+source of error.
+
+A zero or non-finite field means "not set": `ρ_min` and `ρ_max` then default to
+the table's density box, and `w_cap` to a Lorentz factor of 100.
+"""
+struct ProjectionOptions{T<:Real}
+    ρ_min::T
+    ρ_max::T
+    w_cap::T
+end
+
+"""
+    ProjectionOptions{T}(; ρ_min = 0, ρ_max = 0, w_cap = 0)
+    ProjectionOptions(; kwargs...)
+
+The unparameterized form defaults to `Float64`. Usually built by
+[`default_projection`](@ref).
+"""
+function ProjectionOptions{T}(; ρ_min=zero(T), ρ_max=zero(T), w_cap=zero(T)) where {T<:AbstractFloat}
+    return ProjectionOptions{T}(T(ρ_min), T(ρ_max), T(w_cap))
+end
+
+ProjectionOptions(; kwargs...) = ProjectionOptions{Float64}(; kwargs...)
 
 """
     PolicyOptions
 
-Validity thresholds. `ρ_atm` and `ρ_ceiling` are in κ-rescaled g/cm³, not raw
-table densities -- a common source of error.
+The reference physics of [`apply_policy`](@ref): when a state goes to the
+atmosphere, and what the atmosphere is.
 
-`s_atm` and `ye_atm` use NaN as a sentinel: NaN for `s_atm` means the midpoint
-of the physical entropy range at the atmosphere density, and NaN for `ye_atm`
-means preserve the incoming Yₑ. This must stay NaN rather than becoming
-`Union{Nothing,T}`, which would destroy isbits-ness and so the GPU path.
+  * `s_atm`: the atmosphere's entropy, clamped into the window at `ρ_min`. NaN
+    means the window's minimum, the coldest atmosphere.
+  * `ye_atm`: the atmosphere's `Yₑ`. NaN means the incoming state's, clamped.
+  * `atm_trigger`: a state with `D < atm_trigger·ρ_min` goes to the atmosphere.
+    A non-positive or non-finite value means 1.
+  * `collapse_to_atmosphere`: a state on the ρ_max face goes to the atmosphere.
+
+The sentinels must stay NaN rather than become `Union{Nothing,T}`, which would
+destroy isbits-ness and so the GPU path.
 """
 struct PolicyOptions{T<:Real}
-    ρ_atm::T
     s_atm::T
     ye_atm::T
     atm_trigger::T
-    ρ_ceiling::T
-    w_cap::T
-    D_max::T
-    τ_max::T
     collapse_to_atmosphere::Bool
 end
 
 """
-    PolicyOptions{T}(; kwargs...)
+    PolicyOptions{T}(; s_atm = NaN, ye_atm = NaN, atm_trigger = 1.01, collapse_to_atmosphere = false)
     PolicyOptions(; kwargs...)
 
-The unparameterized form defaults to `Float64`. Most fields are normally
-derived from a built table by `default_policy` rather than set by hand.
+The unparameterized form defaults to `Float64`. Needs no table.
 """
-function PolicyOptions{T}(;
-    ρ_atm=zero(T),
-    s_atm=T(NaN),
-    ye_atm=T(NaN),
-    atm_trigger=1.01,
-    ρ_ceiling=zero(T),
-    w_cap=zero(T),
-    D_max=zero(T),
-    τ_max=zero(T),
-    collapse_to_atmosphere=false,
-) where {T<:AbstractFloat}
-    return PolicyOptions{T}(
-        T(ρ_atm), T(s_atm), T(ye_atm), T(atm_trigger), T(ρ_ceiling),
-        T(w_cap), T(D_max), T(τ_max), collapse_to_atmosphere,
-    )
+function PolicyOptions{T}(; s_atm=T(NaN), ye_atm=T(NaN), atm_trigger=1.01,
+                          collapse_to_atmosphere=false) where {T<:AbstractFloat}
+    return PolicyOptions{T}(T(s_atm), T(ye_atm), T(atm_trigger), collapse_to_atmosphere)
 end
 
 PolicyOptions(; kwargs...) = PolicyOptions{Float64}(; kwargs...)
 
-"""A primitive state in the variables the policy layer clamps."""
+"""A primitive state in the variables the projection bounds."""
 struct PrimState{T<:Real}
     ρ::T
     s::T
@@ -80,9 +99,10 @@ The never-fails result: the recovered state, *and* the conserved state that
 `prim2con` generates from it. The caller adopts `cons` as its new conserved
 state.
 
-`policy_flags == 0` means the input was already policy-valid, and then `cons`
-is the input conservatives bit-identically. `policy_flags`, not
-`base.result`, is the validity signal.
+`policy_flags == 0` means the input was already valid, and then `cons` is the
+input conservatives bit-identically. `policy_flags`, not `base.result`, is the
+validity signal. `solved` says whether `con2prim` ran, and `base.result` is
+then what it returned.
 """
 struct Con2PrimSafeOut{T<:Real}
     base::Con2PrimOut{T}
@@ -98,224 +118,87 @@ end
 # default. Written as positive tests so a NaN falls through to the default.
 # ---------------------------------------------------------------------------
 
-@inline function pol_ρ_ceiling(eos::AbstractEOS{S}, pol::PolicyOptions{T}) where {S,T}
-    return (isfinite(pol.ρ_ceiling) && pol.ρ_ceiling > zero(T)) ? pol.ρ_ceiling : exp10(T(last(logρ_bounds(eos))))
+@inline function proj_ρ_max(eos::AbstractEOS{S}, proj::ProjectionOptions{T}) where {S,T}
+    return (isfinite(proj.ρ_max) && proj.ρ_max > zero(T)) ? proj.ρ_max : exp10(T(last(logρ_bounds(eos))))
 end
 
-@inline function pol_ρ_atm(eos::AbstractEOS{S}, pol::PolicyOptions{T}) where {S,T}
-    lo = (isfinite(pol.ρ_atm) && pol.ρ_atm > zero(T)) ? pol.ρ_atm : exp10(T(first(logρ_bounds(eos))))
-    hi = pol_ρ_ceiling(eos, pol)
+@inline function proj_ρ_min(eos::AbstractEOS{S}, proj::ProjectionOptions{T}) where {S,T}
+    lo = (isfinite(proj.ρ_min) && proj.ρ_min > zero(T)) ? proj.ρ_min : exp10(T(first(logρ_bounds(eos))))
+    hi = proj_ρ_max(eos, proj)
     return lo > hi ? hi : lo
 end
 
-@inline function pol_w_cap(pol::PolicyOptions{T}) where {T}
-    return (isfinite(pol.w_cap) && pol.w_cap > zero(T)) ? pol.w_cap : acosh(T(100))
+@inline function proj_w_cap(proj::ProjectionOptions{T}) where {T}
+    return (isfinite(proj.w_cap) && proj.w_cap > zero(T)) ? proj.w_cap : acosh(T(100))
 end
 
 @inline function pol_atm_trigger(pol::PolicyOptions{T}) where {T}
     return (isfinite(pol.atm_trigger) && pol.atm_trigger > zero(T)) ? pol.atm_trigger : one(T)
 end
 
-@inline function pol_ye(eos::AbstractEOS{S}, pol::PolicyOptions{T}, ye_in) where {S,T}
+"""
+    default_projection(eos, ρ_min)
+
+The valid range with everything but its floor density taken from the table:
+`ρ_max` at the top of the density box, and `w_cap` at a Lorentz factor of 100,
+which must stay well below the solver's own `w_max` or the cap is silently
+inoperative.
+"""
+function default_projection(eos::AbstractEOS{S}, ρ_min::T) where {S,T}
+    return ProjectionOptions{T}(; ρ_min=ρ_min, ρ_max=exp10(T(last(logρ_bounds(eos)))), w_cap=acosh(T(100)))
+end
+
+# ---------------------------------------------------------------------------
+# Shared pieces
+# ---------------------------------------------------------------------------
+
+"""
+    clamp_yₑ(eos, yₑ) -> (yₑ, flags)
+
+The Yₑ faces. A value within one ulp of the table's range is valid, since
+`Yₑ·D/D` can come back one ulp off.
+"""
+@inline function clamp_yₑ(eos::AbstractEOS{S}, yₑ::T) where {S,T}
     y_lo, y_hi = yₑ_bounds(eos)
-    y = pol.ye_atm
-    isfinite(y) || (y = T(ye_in))
-    isfinite(y) || (y = T(0.5) * (T(y_lo) + T(y_hi)))
-    return clamp(y, T(y_lo), T(y_hi))
+    lo, hi = T(y_lo), T(y_hi)
+    yₑ < prevfloat(lo) && return lo, FLAG_POL_YE_FLOORED
+    yₑ > nextfloat(hi) && return hi, FLAG_POL_YE_CEILED
+    return yₑ, UInt32(0)
 end
 
-# ---------------------------------------------------------------------------
-# Deriving the bounds
-# ---------------------------------------------------------------------------
-
 """
-    policy_derive_bounds(eos, pol)
+    fixed_state(eos, proj, yₑ = NaN)
 
-Return a copy of `pol` with the collapse ceilings filled in.
-
-`D_max` follows exactly from the density ceiling and the rapidity cap. `τ_max`
-is found by scanning a small grid in density and electron fraction at the
-hottest state, because `ρh` is not monotone on a real table -- taking the
-corner alone would underestimate it.
+What `con2prim_safe` returns where there is nothing to project: at `ρ_min`, at
+rest, at the entropy window's minimum, with the input's (already clamped) `yₑ`,
+or the middle of the Yₑ range where there is none. It exists only so that a
+kernel never propagates NaN; level 2 is expected to replace it.
 """
-function policy_derive_bounds(eos::AbstractEOS{S}, pol::PolicyOptions{T}) where {S,T}
-    w_cap = pol_w_cap(pol)
-    W_cap = cosh(w_cap)
-    ρ_ceiling = pol_ρ_ceiling(eos, pol)
-    D_max = ρ_ceiling * W_cap
-
-    x_lo, x_hi = logρ_bounds(eos)
-    y_lo, y_hi = yₑ_bounds(eos)
-    nx, ny = 5, 3
-    max_ρh = zero(T)
-    for i in 0:(nx - 1)
-        fx = T(i) / T(nx - 1)
-        ρ = exp10(T(x_lo) + fx * (T(x_hi) - T(x_lo)))
-        for j in 0:(ny - 1)
-            fy = T(j) / T(ny - 1)
-            yₑ = T(y_lo) + fy * (T(y_hi) - T(y_lo))
-            sr = srange(eos, ρ, yₑ)
-            pt = evaluate(eos, ρ, sr.s_max, yₑ, T(NaN))
-            ρh = ρ * pt.h
-            (isfinite(ρh) && ρh > max_ρh) && (max_ρh = ρh)
-        end
+@inline function fixed_state(eos::AbstractEOS{S}, proj::ProjectionOptions{T}, yₑ::T=T(NaN)) where {S,T}
+    ρ = proj_ρ_min(eos, proj)
+    if !isfinite(yₑ)
+        y_lo, y_hi = yₑ_bounds(eos)
+        yₑ = T(0.5) * (T(y_lo) + T(y_hi))
     end
-
-    return PolicyOptions{T}(; ρ_atm=pol.ρ_atm, s_atm=pol.s_atm, ye_atm=pol.ye_atm,
-                            atm_trigger=pol.atm_trigger, ρ_ceiling=pol.ρ_ceiling, w_cap=pol.w_cap,
-                            D_max=D_max, τ_max=max_ρh * W_cap * W_cap,
-                            collapse_to_atmosphere=pol.collapse_to_atmosphere)
+    return PrimState{T}(ρ, srange(eos, ρ, yₑ).s_min, yₑ, zero(T))
 end
-
-"""
-    default_policy(eos, ρ_atm)
-
-Everything but the atmosphere density derived from the table itself.
-
-The rapidity cap corresponds to a Lorentz factor of 100, which must stay well
-below the solver's own `w_max` or the cap is silently inoperative.
-"""
-function default_policy(eos::AbstractEOS{S}, ρ_atm::T) where {S,T}
-    pol = PolicyOptions{T}(; ρ_atm=ρ_atm, s_atm=T(NaN), ye_atm=T(NaN), atm_trigger=T(1.01),
-                           ρ_ceiling=exp10(T(last(logρ_bounds(eos)))), w_cap=acosh(T(100)),
-                           collapse_to_atmosphere=false)
-    return policy_derive_bounds(eos, pol)
-end
-
-"""
-    policy_atmosphere(eos, pol, ye_in)
-
-The atmosphere state: at rest, at the floor density, at the midpoint of the
-physical entropy window unless the policy pins it.
-"""
-function policy_atmosphere(eos::AbstractEOS{S}, pol::PolicyOptions{T}, ye_in) where {S,T}
-    ρ = pol_ρ_atm(eos, pol)
-    yₑ = pol_ye(eos, pol, ye_in)
-    sr = srange(eos, ρ, yₑ)
-    s = isfinite(pol.s_atm) ? clamp(pol.s_atm, sr.s_min, sr.s_max) : T(0.5) * (sr.s_min + sr.s_max)
-    return PrimState{T}(ρ, s, yₑ, zero(T))
-end
-
-# ---------------------------------------------------------------------------
-# Projection
-# ---------------------------------------------------------------------------
-
-"""
-    pol_project_core(eos, pol, in) -> (state, flags)
-
-Clamp a primitive state into validity. The order is fixed and matters:
-finiteness, then density, then electron fraction, then entropy at the *already
-clamped* density and fraction, then rapidity.
-
-The entropy is clamped to the **physical** window, not the extended one: a
-converged state out in the extension zone is outside the table's validity, even
-though the solver can represent it.
-
-Exactly one entropy-window lookup on every path, and no solves.
-"""
-function pol_project_core(eos::AbstractEOS{S}, pol::PolicyOptions{T}, in::PrimState{T}) where {S,T}
-    if !(isfinite(in.ρ) && isfinite(in.s) && isfinite(in.ye) && isfinite(in.w))
-        return policy_atmosphere(eos, pol, in.ye), FLAG_POL_NONFINITE | FLAG_POL_ATMOSPHERE
-    end
-
-    ρ_hi = pol_ρ_ceiling(eos, pol)
-    ρ_lo = pol_ρ_atm(eos, pol)
-    # Deliberately the unscaled floor rather than the trigger, so that this is
-    # idempotent and an atmosphere point checks clean.
-    in.ρ < ρ_lo && return policy_atmosphere(eos, pol, in.ye), FLAG_POL_ATMOSPHERE
-
-    flags = UInt32(0)
-    ρ, s, yₑ, w = in.ρ, in.s, in.ye, in.w
-
-    if ρ > ρ_hi
-        ρ = ρ_hi
-        flags |= FLAG_POL_ρ_CEILED
-    end
-    y_lo, y_hi = yₑ_bounds(eos)
-    if yₑ < y_lo
-        yₑ = T(y_lo)
-        flags |= FLAG_POL_YE_CLAMPED
-    elseif yₑ > y_hi
-        yₑ = T(y_hi)
-        flags |= FLAG_POL_YE_CLAMPED
-    end
-
-    sr = srange(eos, ρ, yₑ)
-    if s < sr.s_min
-        s = sr.s_min
-        flags |= FLAG_POL_S_FLOORED
-    elseif s > sr.s_max
-        s = sr.s_max
-        flags |= FLAG_POL_S_CEILED
-    end
-
-    w_cap = pol_w_cap(pol)
-    if w < zero(T)
-        w = zero(T)
-        flags |= FLAG_POL_W_CAPPED
-    elseif w > w_cap
-        w = w_cap
-        flags |= FLAG_POL_W_CAPPED
-    end
-
-    return PrimState{T}(ρ, s, yₑ, w), flags
-end
-
-"""
-    check_prim_state(eos, ps, pol) -> flags
-
-What a projection *would* change, without changing anything. No solves, so this
-is cheap enough to run at every point of every timestep.
-"""
-@inline function check_prim_state(eos::AbstractEOS{S}, ps::PrimState{T}, pol::PolicyOptions{T}) where {S,T}
-    return pol_project_core(eos, pol, ps)[2]
-end
-
-"""
-    project_prim_state(eos, ps, pol) -> (state, flags)
-
-Clamp into validity, reporting what changed. Idempotent.
-"""
-@inline function project_prim_state(eos::AbstractEOS{S}, ps::PrimState{T},
-                                    pol::PolicyOptions{T}) where {S,T}
-    return pol_project_core(eos, pol, ps)
-end
-
-# ---------------------------------------------------------------------------
-# Packaging a repaired state
-# ---------------------------------------------------------------------------
 
 """
     pol_package(eos, ps, S_par, S_perp, B², u_guess) -> (base, cons)
 
-Regenerate conserved variables from a repaired primitive state.
+Regenerate conserved variables from a projected primitive state.
 
-This is the whole mechanism: every repair goes through primitives and the
-conservatives come back out of `prim2con`, never edited by hand. That is what
-makes `con2prim(returned cons) == returned prims` true by construction rather
-than by hope.
-
-The field direction is recovered from the incoming momentum, so the repaired
-state keeps pointing the way the original did.
+The velocity's direction relative to `B` is taken from the incoming momentum at
+the projected state's own enthalpy density, which makes the returned momentum
+exactly parallel to the input: a face that lowers `S` scales it, never turns it.
 """
 function pol_package(eos::AbstractEOS{S}, ps::PrimState{T}, S_par::T, S_perp::T, B²::T,
                      u_guess::T) where {S,T}
     pt = evaluate(eos, ps.ρ, ps.s, ps.ye, u_guess)
     W = cosh(ps.w)
     v = tanh(ps.w)
-    z = ps.ρ * pt.h * W * W
-    sp = isfinite(S_par) ? S_par : zero(T)
-    spp = (isfinite(S_perp) && S_perp > zero(T)) ? S_perp : zero(T)
-
-    cos_vB = zero(T)
-    if z > zero(T) && isfinite(z)
-        vp = sp / z
-        vq = spp / (z + B²)
-        Vr = safe_sqrt(vp * vp + vq * vq)
-        (isfinite(Vr) && Vr > zero(T)) && (cos_vB = clamp(vp / Vr, -one(T), one(T)))
-    end
-
-    cons = prim2con(eos, ps.ρ, ps.s, ps.ye, ps.w, B², cos_vB, pt.u_solved)
+    cos_vB, _ = velocity_direction(S_par, S_perp, B², ps.ρ * pt.h * W * W)
+    cons = prim2con_at(pt, ps.ρ, ps.ye, ps.w, B², cos_vB)
     sin_vB² = one(T) - cos_vB * cos_vB
     sin_vB = safe_sqrt(sin_vB² > zero(T) ? sin_vB² : zero(T))
     base = Con2PrimOut{T}(ps.ρ, ps.s, ps.ye, ps.w, W, v * cos_vB, v * sin_vB, pt,
@@ -323,48 +206,110 @@ function pol_package(eos::AbstractEOS{S}, ps::PrimState{T}, S_par::T, S_perp::T,
     return base, cons
 end
 
-"""
-    pol_collapse(eos, pol, in, ye_in, B²) -> (base, cons, flags)
+"""Package `ps`, keeping the outcome of the `con2prim` call (if any) in `base`."""
+@inline function package_out(eos::AbstractEOS{S}, ps::PrimState{T}, in::Con2PrimIn{T}, B²::T, u::T,
+                             res::C2PResult.T, it_n::Int32, it_f::Int32, flags::UInt32,
+                             solved::Bool) where {S,T}
+    nb, cons = pol_package(eos, ps, in.S_par, in.S_perp, B², u)
+    base = Con2PrimOut{T}(nb.ρ, nb.s, nb.ye, nb.w, nb.W, nb.v_par, nb.v_perp, nb.eos, res, it_n, it_f,
+                          nb.flags)
+    return Con2PrimSafeOut{T}(base, cons, flags, solved)
+end
 
-Handle a state past the collapse ceiling, by excising to atmosphere or by
-projecting onto the ceiling primitives.
 """
-function pol_collapse(eos::AbstractEOS{S}, pol::PolicyOptions{T}, in::Con2PrimIn{T}, ye_in::T,
-                      B²::T) where {S,T}
-    if pol.collapse_to_atmosphere
-        ps = policy_atmosphere(eos, pol, ye_in)
-        base, cons = pol_package(eos, ps, in.S_par, in.S_perp, B², T(NaN))
-        return base, cons, FLAG_POL_CEILING | FLAG_POL_ATMOSPHERE
-    end
+    valid_w_interval(D, ρ_min, ρ_max, w_cap) -> (w_lo, w_hi, hi_is_cap)
 
-    w_cap = pol_w_cap(pol)
-    ρ = pol_ρ_ceiling(eos, pol)
-    yₑ = pol_ye(eos, pol, ye_in)
+The rapidities at which a state keeping `D` has `ρ ∈ [ρ_min, ρ_max]` and
+`w ≤ w_cap`. `hi_is_cap` says whether `w_cap` or `ρ_min` bounds it above.
+"""
+@inline function valid_w_interval(D::T, ρ_min::T, ρ_max::T, w_cap::T) where {T}
+    q = D / ρ_min
+    w_ρmin = acosh(q > one(T) ? q : one(T))
+    hi_is_cap = w_cap <= w_ρmin
+    w_hi = hi_is_cap ? w_cap : w_ρmin
+    q = D / ρ_max
+    w_lo = acosh(q > one(T) ? q : one(T))
+    w_lo > w_hi && (w_lo = w_hi)
+    return w_lo, w_hi, hi_is_cap
+end
+
+"""Is a converged state inside every face, to the slack?"""
+@inline function inside_faces(eos::AbstractEOS{S}, ρ::T, s::T, yₑ::T, w::T, ρ_min::T, ρ_max::T,
+                              w_cap::T) where {S,T}
+    δ = face_slack(T)
+    (isfinite(ρ) && isfinite(s) && isfinite(w)) || return false
+    (ρ >= ρ_min * (one(T) - δ) && ρ <= ρ_max * (one(T) + δ) && w <= w_cap * (one(T) + δ)) || return false
     sr = srange(eos, ρ, yₑ)
-    s = sr.s_max
-    pt = evaluate(eos, ρ, s, yₑ, T(NaN))
+    slack = δ * (sr.s_max - sr.s_min)
+    return sr.s_min - slack <= s <= sr.s_max + slack
+end
 
-    Wc = cosh(w_cap)
-    z = ρ * pt.h * Wc * Wc
-    flags = FLAG_POL_CEILING
-    V = zero(T)
-    if z > zero(T) && isfinite(z)
-        sp = isfinite(in.S_par) ? in.S_par : zero(T)
-        spp = (isfinite(in.S_perp) && in.S_perp > zero(T)) ? in.S_perp : zero(T)
-        V = safe_sqrt((sp / z)^2 + (spp / (z + B²))^2)
+@inline con_finite(in::Con2PrimIn) = isfinite(in.D) && isfinite(in.τ) && isfinite(in.D_Y) &&
+                                     isfinite(in.S_par) && isfinite(in.S_perp) && isfinite(in.B²)
+
+# ---------------------------------------------------------------------------
+# Primitive states
+# ---------------------------------------------------------------------------
+
+"""
+    project_prim_state(eos, ps, proj) -> (state, flags)
+
+The projection on primitives, where every face is a plain clamp: ρ, then Yₑ,
+then s in the window at the clamped `(ρ, Yₑ)`, then w. Each face is tested with
+the same slack as in `con2prim_safe`, so an output of `con2prim_safe` checks
+clean. Idempotent, bit for bit.
+
+A non-finite state, `ρ ≤ 0` or `w < 0` has no closest valid state, and gives
+`FLAG_POL_NONFINITE` with the fixed state. `w` is a magnitude, so `w ≥ 0` is not
+a face.
+"""
+function project_prim_state(eos::AbstractEOS{S}, ps::PrimState{T}, proj::ProjectionOptions{T}) where {S,T}
+    if !(isfinite(ps.ρ) && isfinite(ps.s) && isfinite(ps.ye) && isfinite(ps.w) && ps.ρ > zero(T) &&
+         ps.w >= zero(T))
+        return fixed_state(eos, proj), FLAG_POL_NONFINITE
     end
-    isfinite(V) || (V = zero(T))
+    δ = face_slack(T)
+    ρ_min = proj_ρ_min(eos, proj)
+    ρ_max = proj_ρ_max(eos, proj)
+    w_cap = proj_w_cap(proj)
 
-    w = if V < tanh(w_cap)
-        clamp(atanh(V), zero(T), w_cap)
-    else
-        flags |= FLAG_POL_W_CAPPED
-        w_cap
+    ρ, s, w = ps.ρ, ps.s, ps.w
+    flags = UInt32(0)
+    if ρ < ρ_min * (one(T) - δ)
+        ρ = ρ_min
+        flags |= FLAG_POL_ρ_FLOORED
+    elseif ρ > ρ_max * (one(T) + δ)
+        ρ = ρ_max
+        flags |= FLAG_POL_ρ_CEILED
+    end
+    yₑ, fy = clamp_yₑ(eos, ps.ye)
+    flags |= fy
+
+    sr = srange(eos, ρ, yₑ)
+    slack = δ * (sr.s_max - sr.s_min)
+    if s < sr.s_min - slack
+        s = sr.s_min
+        flags |= FLAG_POL_S_FLOORED
+    elseif s > sr.s_max + slack
+        s = sr.s_max
+        flags |= FLAG_POL_S_CEILED
     end
 
-    ps = PrimState{T}(ρ, s, yₑ, w)
-    base, cons = pol_package(eos, ps, in.S_par, in.S_perp, B², pt.u_solved)
-    return base, cons, flags
+    if w > w_cap * (one(T) + δ)
+        w = w_cap
+        flags |= FLAG_POL_W_CEILED
+    end
+    return PrimState{T}(ρ, s, yₑ, w), flags
+end
+
+"""
+    check_prim_state(eos, ps, proj) -> flags
+
+What [`project_prim_state`](@ref) *would* change, without changing anything. No
+solves, so this is cheap enough to run at every point of every timestep.
+"""
+@inline function check_prim_state(eos::AbstractEOS{S}, ps::PrimState{T}, proj::ProjectionOptions{T}) where {S,T}
+    return project_prim_state(eos, ps, proj)[2]
 end
 
 # ---------------------------------------------------------------------------
@@ -372,197 +317,311 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    check_con_state(eos, in, pol; check_endpoints = false, solver = Con2PrimOptions())
+    check_con_state(eos, in, proj; check_endpoints = false, solver = Con2PrimOptions())
 
-Diagnose a conserved state without repairing it.
+Diagnose a conserved state without repairing it. Every flag it reports is one
+that `con2prim_safe` sets; it does not promise to report every face.
 
 By default this is pure arithmetic -- no EOS evaluation at all -- so it is cheap
-enough to run at every point of every timestep. With `check_endpoints` it also
-solves at the two ends of the entropy window, which detects a state whose energy
-lies outside anything the table can express.
+enough to run at every point of every timestep. It reports a non-finite input,
+`D < ρ_min` (`ρ_FLOORED`), `D > ρ_max·cosh(w_cap)` (`ρ_CEILED`), and `Yₑ`
+outside the table. With `check_endpoints` it also runs the entropy-edge part of
+`con2prim_safe`'s diagnosis, and reports `S_FLOORED` or `S_CEILED` where that
+alone decides the projection, and only when no ρ face is reported. It tests the
+edges moved outward by the face slack, and the energy residual against
+`check_f2_tol` (the solver's tolerance at Float64, 128 times it at Float32), so
+that a state `con2prim_safe` accepts as lying on a face is not reported.
 """
-function check_con_state(eos::AbstractEOS{S}, in::Con2PrimIn{T}, pol::PolicyOptions{T};
-                         check_endpoints::Bool=false, solver::Con2PrimOptions{T}=Con2PrimOptions{T}()) where {S,T}
-    fin = isfinite(in.D) && isfinite(in.τ) && isfinite(in.D_Y) && isfinite(in.S_par) &&
-          isfinite(in.S_perp) && isfinite(in.B²)
-    (fin && in.D > zero(T) && in.B² >= zero(T)) ||
-        return FLAG_POL_NONFINITE | FLAG_POL_ATMOSPHERE
+function check_con_state(eos::AbstractEOS{S}, in::Con2PrimIn{T}, proj::ProjectionOptions{T};
+                         check_endpoints::Bool=false,
+                         solver::Con2PrimOptions{T}=Con2PrimOptions{T}()) where {S,T}
+    (con_finite(in) && in.D > zero(T) && in.B² >= zero(T)) || return FLAG_POL_NONFINITE
 
-    in.D < pol_atm_trigger(pol) * pol_ρ_atm(eos, pol) && return FLAG_POL_ATMOSPHERE
+    δ = face_slack(T)
+    ρ_min = proj_ρ_min(eos, proj)
+    ρ_max = proj_ρ_max(eos, proj)
+    w_cap = proj_w_cap(proj)
+    D = in.D
+    yₑ, flags = clamp_yₑ(eos, in.D_Y / D)
 
-    flags = UInt32(0)
-    B² = in.B² > zero(T) ? in.B² : zero(T)
-    D_over = isfinite(pol.D_max) && pol.D_max > zero(T) && in.D > pol.D_max
-    # The magnetic part of τ is excluded from the comparison, which is the
-    # conservative choice.
-    τ_over = isfinite(pol.τ_max) && pol.τ_max > zero(T) && (in.τ - B²) > pol.τ_max
-    (D_over || τ_over) && (flags |= FLAG_POL_CEILING)
+    D < ρ_min * (one(T) - δ) && return flags | FLAG_POL_ρ_FLOORED
+    D > ρ_max * cosh(w_cap) * (one(T) + δ) && return flags | FLAG_POL_ρ_CEILED
+    check_endpoints || return flags
 
-    (flags != 0 || !check_endpoints) && return flags
-
-    y_lo, y_hi = yₑ_bounds(eos)
-    yₑ = clamp(in.D_Y / in.D, T(y_lo), T(y_hi))
-    sr_a = srange(eos, in.D, yₑ)
-    sr_b = srange(eos, in.D / cosh(solver.w_max), yₑ)
-    s_lo = min(sr_a.s_min, sr_b.s_min)
-    s_hi = max(sr_a.s_max, sr_b.s_max)
-
-    r_lo, _ = inner_solve_w(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, B², s_lo, solver.w_max,
-                            solver.τ_floor_rel, zero(T), T(NaN), solver.max_iter_1d, solver.tol)
-    isfinite(r_lo.f2) && r_lo.f2 > zero(T) && return flags | FLAG_POL_S_FLOORED
-
-    r_hi, _ = inner_solve_w(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, B², s_hi, solver.w_max,
-                            solver.τ_floor_rel, r_lo.w, r_lo.pt.u_solved, solver.max_iter_1d, solver.tol)
-    isfinite(r_hi.f2) && r_hi.f2 < zero(T) && return flags | FLAG_POL_CEILING
-
+    # First the branch con2prim_safe's diagnosis takes, on the edges
+    # themselves; where it would run a face solve, nothing can be promised.
+    # Then the cold or hot test, on the edges moved outward by the slack: a
+    # root that fails it there lies beyond the band con2prim_safe accepts as
+    # valid, and so cannot be returned unflagged. One call site each, as in
+    # con2prim_safe.
+    tol = solver.tol
+    tol_f2 = max(tol, check_f2_tol(T))
+    w_lo, w_hi, _ = valid_w_interval(D, ρ_min, ρ_max, w_cap)
+    e = es = nan_edge_ends(T)
+    for pass in 1:2
+        ee = edge_ends(eos, D, in.τ, yₑ, in.S_par, in.S_perp, in.B², pass == 1 ? zero(T) : δ, w_lo, w_hi, T(NaN),
+                       solver)
+        if pass == 1
+            e = ee
+            (edge_φ(e.min_lo) > zero(T) || edge_φ(e.max_hi) < zero(T) || edge_φ(e.min_hi) < zero(T)) &&
+                return flags
+        else
+            es = ee
+        end
+    end
+    for k in 1:2
+        upper = k == 2
+        # con2prim_safe's hot test runs on the edge only where its root is in range.
+        upper && !(edge_φ(e.max_lo) <= zero(T)) && break
+        ra = upper ? es.max_lo : es.min_lo
+        rb = upper ? es.max_hi : es.min_hi
+        (edge_φ(ra) <= zero(T) && edge_φ(rb) >= zero(T)) || break
+        r = edge_root(eos, D, in.τ, yₑ, in.S_par, in.S_perp, in.B², upper, δ, ra, rb, solver)
+        f1_converged(r, tol) || break
+        !upper && r.f2 > tol_f2 && return flags | FLAG_POL_S_FLOORED
+        upper && r.f2 < -tol_f2 && return flags | FLAG_POL_S_CEILED
+    end
     return flags
 end
 
 # ---------------------------------------------------------------------------
-# The never-fails path
+# Level 1: the projection
+# ---------------------------------------------------------------------------
+
+# The conditions under which a try in `con2prim_safe` is the answer.
+const TRY_ALWAYS = Int8(0)      # no condition: no other face can be active
+const TRY_COLD = Int8(1)        # on an edge, f₂ > 0: τ raised
+const TRY_HOT = Int8(2)         # on an edge, f₂ < 0: τ lowered
+const TRY_S_LOWERED = Int8(3)   # at w_hi, φ < 0: S lowered
+const TRY_D_LOWERED = Int8(4)   # at ρ_max, ρ_max·cosh w < D: D lowered
+
+"""One candidate solve in `con2prim_safe`: an edge root, or a face solve at fixed ρ."""
+struct FaceTry{T<:Real}
+    edge::Bool
+    upper::Bool
+    ρ::T
+    w::T
+    free_w::Bool
+    flags::UInt32
+    cond::Int8
+end
+
+"""
+    con2prim_safe(eos, in, opts, proj, s_guess = NaN, w_guess = NaN, u_guess = NaN)
+
+Recover primitives from conserved variables, for *any* input whatsoever, and
+project them onto the valid range `proj` describes.
+
+Returns the recovered state together with the conserved variables that
+correspond to it; the caller adopts `cons` as its new conserved state. Each
+face of the valid range that was active sets its own bit in `policy_flags`, and
+the returned state lies on it. Each face fixes one primitive and frees one
+conservative; everything else is kept, to the solver's tolerance:
+
+| face | flag | what gives way |
+| --- | --- | --- |
+| `s_max` | `S_CEILED` | τ lowered |
+| `s_min` | `S_FLOORED` | τ raised |
+| `w_cap` | `W_CEILED` | S lowered |
+| `ρ_max` | `ρ_CEILED` | D lowered |
+| `ρ_min` | `ρ_FLOORED` | S lowered to `w = acosh(D′/ρ_min)`, D raised to `D′ = max(D, ρ_min)` |
+| Yₑ bounds | `YE_FLOORED`, `YE_CEILED` | `D_Y` set to `Yₑ·D` with Yₑ clamped |
+
+`policy_flags == 0` means the input was already valid, and then `cons` is the
+input bit-identically. Two outcomes are not projections: `NONFINITE` (a
+non-finite input, `D ≤ 0` or `B² < 0`) and `NOT_CONVERGED` (the solve failed,
+but the diagnosis finds a valid state inside the range). Both return a fixed
+valid state only so that a kernel never propagates NaN; [`apply_policy`](@ref)
+is expected to replace it.
+
+This level has no notion of an atmosphere or of collapse; that is
+[`apply_policy`](@ref)'s.
+"""
+function con2prim_safe(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T},
+                       proj::ProjectionOptions{T}, s_guess::T=T(NaN), w_guess::T=T(NaN),
+                       u_guess::T=T(NaN)) where {S,T}
+    # Every solver below has exactly one call site, and the result is packaged
+    # at one: a GPU compiler inlines every call, and each copy carries whole EOS
+    # evaluations. The decision is therefore made first, as at most two "tries"
+    # -- an edge root or a face solve, each with the condition under which it is
+    # the answer -- which one loop then runs.
+    res, it_n, it_f, solved = C2PResult.converged_newton, Int32(0), Int32(0), false
+    ρ_min = proj_ρ_min(eos, proj)
+    ρ_max = proj_ρ_max(eos, proj)
+    w_cap = proj_w_cap(proj)
+    δ = face_slack(T)
+    tol = opts.tol
+    D, τ, S_par, S_perp = in.D, in.τ, in.S_par, in.S_perp
+    B² = (isfinite(in.B²) && in.B² > zero(T)) ? in.B² : zero(T)
+
+    yₑ = T(NaN)
+    flags = UInt32(0)
+    u = T(NaN)
+    e = nan_edge_ends(T)
+    ntry = 0
+    try1 = try2 = FaceTry{T}(false, false, zero(T), zero(T), false, UInt32(0), TRY_ALWAYS)
+
+    if !(con_finite(in) && D > zero(T) && in.B² >= zero(T))
+        flags = FLAG_POL_NONFINITE
+    else
+        # 1. Yₑ decouples from the rest, and is clamped first.
+        yₑ, flags = clamp_yₑ(eos, in.D_Y / D)
+
+        # 2. Faces decided by D alone, before any solve. Below ρ_min every
+        #    rapidity gives ρ < ρ_min, so the state is put at rest at ρ_min, the
+        #    least mass added; above ρ_max·cosh(w_cap) none gives ρ ≤ ρ_max.
+        if D < ρ_min * (one(T) - δ)
+            ntry = 1
+            try1 = FaceTry{T}(false, false, ρ_min, zero(T), false, FLAG_POL_ρ_FLOORED, TRY_ALWAYS)
+        elseif D > ρ_max * cosh(w_cap) * (one(T) + δ)
+            ntry = 1
+            try1 = FaceTry{T}(false, false, ρ_max, zero(T), true, FLAG_POL_ρ_CEILED, TRY_ALWAYS)
+        else
+            # 3. The ordinary path. Only a state inside every face is taken from
+            #    the solve; anything else is decided by the diagnosis below, so
+            #    that a converged and a failed solve of neighbouring states
+            #    project alike.
+            D_Y = flags == 0 ? in.D_Y : yₑ * D
+            base = con2prim(eos, Con2PrimIn{T}(D, τ, D_Y, S_par, S_perp, B²), opts, s_guess, w_guess, u_guess)
+            res, it_n, it_f, solved = base.result, base.iters_newton, base.iters_fallback, true
+            converged = res === C2PResult.converged_newton || res === C2PResult.converged_fallback
+            if converged && inside_faces(eos, base.ρ, base.s, yₑ, base.w, ρ_min, ρ_max, w_cap)
+                # The input's own B², so that a -0.0 also comes back bit for bit.
+                return Con2PrimSafeOut{T}(base, Prim2ConOut{T}(D, τ, D_Y, S_par, S_perp, in.B²), flags, true)
+            end
+
+            # 4. The diagnosis, on the rapidities at which keeping D leaves ρ
+            #    and w in range. Along an entropy edge the state that keeps D and
+            #    S is a root of φ; G = f₂ along the solve's curve rises with s,
+            #    so the cold end of the valid part of that curve decides "too
+            #    cold", the hot end "too hot".
+            u = base.eos.u_solved
+            w_lo, w_hi, hi_is_cap = valid_w_interval(D, ρ_min, ρ_max, w_cap)
+            hi_flag = hi_is_cap ? FLAG_POL_W_CEILED : FLAG_POL_ρ_FLOORED
+            ρ_hi = hi_is_cap ? D / cosh(w_cap) : ρ_min
+            on_ρmax = FaceTry{T}(false, false, ρ_max, zero(T), true, FLAG_POL_ρ_CEILED, TRY_ALWAYS)
+            on_w_hi = FaceTry{T}(false, false, ρ_hi, w_hi, false, hi_flag, TRY_ALWAYS)
+            e = edge_ends(eos, D, τ, yₑ, S_par, S_perp, B², zero(T), w_lo, w_hi, u, opts)
+            ntry = 1
+            if edge_φ(e.min_lo) > zero(T)
+                # 4.1 The s_min edge's root lies above ρ_max: every state
+                #     keeping D and S is too cold or too dense, and D has to give.
+                try1 = on_ρmax
+            elseif edge_φ(e.max_hi) < zero(T)
+                # 4.2 The s_max edge's root lies beyond w_hi: every state
+                #     keeping D and S is too hot or too fast, and S has to give.
+                try1 = on_w_hi
+            else
+                # 4.3 Too cold at the cold end: on the s_min edge if its root is
+                #     in range, else at w_hi if the state there carries less
+                #     momentum than the input. 4.4 Too hot at the hot end: on the
+                #     s_max edge if its root is in range, else at ρ_max if that
+                #     removes mass.
+                ntry = 2
+                try1 = edge_φ(e.min_hi) >= zero(T) ?
+                       FaceTry{T}(true, false, zero(T), zero(T), false, FLAG_POL_S_FLOORED, TRY_COLD) :
+                       FaceTry{T}(false, false, ρ_hi, w_hi, false, hi_flag, TRY_S_LOWERED)
+                try2 = edge_φ(e.max_lo) <= zero(T) ?
+                       FaceTry{T}(true, true, zero(T), zero(T), false, FLAG_POL_S_CEILED, TRY_HOT) :
+                       FaceTry{T}(false, false, ρ_max, zero(T), true, FLAG_POL_ρ_CEILED, TRY_D_LOWERED)
+            end
+        end
+    end
+
+    # Run the tries. A face state that fails its condition by no more than the
+    # tolerance is itself a solution, and is kept in `near`.
+    F = FaceState{T}(T(NaN), T(NaN), T(NaN), T(NaN), T(NaN), UInt32(0))
+    found = false
+    near = F
+    near_res = T(Inf)
+    for k in 1:ntry
+        t = k == 1 ? try1 : try2
+        resid = T(NaN)
+        if t.edge
+            r = edge_root(eos, D, τ, yₑ, S_par, S_perp, B², t.upper, zero(T), t.upper ? e.max_lo : e.min_lo,
+                          t.upper ? e.max_hi : e.min_hi, opts)
+            Ft = FaceState{T}(r.ρ, r.s, r.w, r.pt.u_solved, zero(T), t.flags)
+            resid = f1_converged(r, tol) ? r.f2 : T(NaN)
+            accept = t.cond == TRY_COLD ? r.f2 > zero(T) : r.f2 < zero(T)
+        else
+            G = face_solve(eos, t.ρ, t.w, t.free_w, w_cap, yₑ, τ, S_par, S_perp, B², u, opts)
+            Ft = FaceState{T}(G.ρ, G.s, G.w, G.u, G.φ, G.flags | t.flags)
+            t.cond == TRY_S_LOWERED && (resid = G.φ)
+            t.cond == TRY_D_LOWERED && (resid = (t.ρ * cosh(G.w) - D) / D)
+            accept = t.cond == TRY_ALWAYS || (t.cond == TRY_S_LOWERED && G.φ < zero(T)) ||
+                     (t.cond == TRY_D_LOWERED && t.ρ * cosh(G.w) < D)
+        end
+        if accept
+            F, found = Ft, true
+            break
+        end
+        if abs(resid) <= tol && abs(resid) < near_res
+            near, near_res = Ft, abs(resid)
+        end
+    end
+
+    # 4.5 Neither cold nor hot. A face state that solves the input to the
+    #     tolerance is a solution on the face: where the energy barely depends
+    #     on s, as for a cold state in Float32, G is flat to within the
+    #     tolerance across the window and the solve may have converged
+    #     anywhere. Otherwise a valid state lies inside the range, but the solve
+    #     did not return it; this is only seen where the inner root is not
+    #     unique.
+    if !found && ntry > 0 && near_res <= tol
+        F, found = near, true
+    end
+    found && !(isfinite(F.ρ) && isfinite(F.s) && isfinite(F.w)) && (found = false)
+    if found
+        flags |= F.flags
+    elseif flags & FLAG_POL_NONFINITE == 0
+        flags |= FLAG_POL_NOT_CONVERGED
+    end
+    ps = found ? PrimState{T}(F.ρ, F.s, yₑ, F.w) : fixed_state(eos, proj, yₑ)
+    return package_out(eos, ps, in, B², found ? F.u : T(NaN), res, it_n, it_f, flags, solved)
+end
+
+# ---------------------------------------------------------------------------
+# Level 2: the application's physics
 # ---------------------------------------------------------------------------
 
 """
-    con2prim_safe(eos, in, opts, pol; s_guess = NaN, w_guess = NaN, u_guess = NaN)
+    apply_policy(eos, in, out, proj, pol) -> Con2PrimSafeOut
 
-Recover primitives from conserved variables, for *any* input whatsoever --
-non-finite garbage, a collapse state, a superluminal momentum demand, vacuum, or
-an energy below the coldest state the table can express.
+The reference physics on top of [`con2prim_safe`](@ref), called on its output:
 
-Returns the recovered state together with the conserved variables that
-correspond to it. The caller adopts `cons` as its new conserved state; because
-every repair goes through primitives, that state is exactly solvable rather than
-merely plausible.
+```julia
+out = con2prim_safe(eos, in, opts, proj)       # level 1: projection
+out = apply_policy(eos, in, out, proj, pol)    # level 2: physics
+```
 
-`policy_flags == 0` means the input was already valid, and then `cons` is the
-input bit-identically. That flag word, not `base.result`, is the validity
-signal: the returned state is usable even when the solver reports a failure.
+Replaces the state by the atmosphere -- at rest, at `ρ_min`, with `pol.s_atm`
+and `pol.ye_atm` -- where 1.x would have: on `ρ_FLOORED`, for
+`D < atm_trigger·ρ_min`, on `NONFINITE` and `NOT_CONVERGED`, and on `ρ_CEILED`
+when `collapse_to_atmosphere` is set. It then adds `FLAG_POL_ATMOSPHERE` to
+level 1's bits, which say why. Otherwise it returns `out` unchanged.
 
-`FLAG_POL_ρ_FLOORED` means the repair raised ρ to the atmosphere density
-without replacing the whole state, so the returned `cons.D` exceeds the input
-`D`: rest mass, and with it momentum, was added. A caller that would rather put
-such a point at rest has to do so itself. `FLAG_POL_ρ_CEILED` is the opposite
-case, with mass removed. Capping the rapidity raises ρ as well, but preserves
-`D`, and is reported only as `FLAG_POL_W_CAPPED`.
-
-Physics fidelity is explicitly not the goal in the excision regime. The point is
-to keep the evolution running with a state that is valid, however bad the
-physics has become.
+An application with its own rules replaces this function rather than
+configuring it. It has `in` and `out` to compare, so needs no further flags.
 """
-function con2prim_safe(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T},
-                       pol::PolicyOptions{T}, s_guess::T=T(NaN), w_guess::T=T(NaN),
-                       u_guess::T=T(NaN)) where {S,T}
+function apply_policy(eos::AbstractEOS{S}, in::Con2PrimIn{T}, out::Con2PrimSafeOut{T}, proj::ProjectionOptions{T},
+                      pol::PolicyOptions{T}) where {S,T}
+    f = out.policy_flags
+    ρ_min = proj_ρ_min(eos, proj)
+    atm = (f & (FLAG_POL_ρ_FLOORED | FLAG_POL_NONFINITE | FLAG_POL_NOT_CONVERGED)) != 0 ||
+          !(in.D >= pol_atm_trigger(pol) * ρ_min) ||
+          (pol.collapse_to_atmosphere && (f & FLAG_POL_ρ_CEILED) != 0)
+    atm || return out
+
+    yₑ = pol.ye_atm
+    if !isfinite(yₑ)
+        yₑ = (isfinite(in.D_Y) && isfinite(in.D) && in.D > zero(T)) ? in.D_Y / in.D : out.base.ye
+    end
+    yₑ, _ = clamp_yₑ(eos, isfinite(yₑ) ? yₑ : out.base.ye)
+    sr = srange(eos, ρ_min, yₑ)
+    s = isfinite(pol.s_atm) ? clamp(pol.s_atm, sr.s_min, sr.s_max) : sr.s_min
+
     B² = (isfinite(in.B²) && in.B² > zero(T)) ? in.B² : zero(T)
-    fin = isfinite(in.D) && isfinite(in.τ) && isfinite(in.D_Y) && isfinite(in.S_par) &&
-          isfinite(in.S_perp) && isfinite(in.B²)
-
-    # 0. Garbage in: excise to atmosphere rather than propagate it.
-    if !(fin && in.D > zero(T) && in.B² >= zero(T))
-        ye_in = (isfinite(in.D) && in.D > zero(T) && isfinite(in.D_Y)) ? in.D_Y / in.D : T(NaN)
-        ps = policy_atmosphere(eos, pol, ye_in)
-        base, cons = pol_package(eos, ps, in.S_par, in.S_perp, B², T(NaN))
-        return Con2PrimSafeOut{T}(base, cons, FLAG_POL_NONFINITE | FLAG_POL_ATMOSPHERE, false)
-    end
-
-    ye_in = in.D_Y / in.D
-
-    # 1. Vacuum and collapse, both pure arithmetic, before any solve is attempted.
-    if in.D < pol_atm_trigger(pol) * pol_ρ_atm(eos, pol)
-        ps = policy_atmosphere(eos, pol, ye_in)
-        base, cons = pol_package(eos, ps, in.S_par, in.S_perp, B², T(NaN))
-        return Con2PrimSafeOut{T}(base, cons, FLAG_POL_ATMOSPHERE, false)
-    end
-
-    D_over = isfinite(pol.D_max) && pol.D_max > zero(T) && in.D > pol.D_max
-    τ_over = isfinite(pol.τ_max) && pol.τ_max > zero(T) && (in.τ - B²) > pol.τ_max
-    if D_over || τ_over
-        base, cons, flags = pol_collapse(eos, pol, in, ye_in, B²)
-        return Con2PrimSafeOut{T}(base, cons, flags, false)
-    end
-
-    # 2. The ordinary path.
-    base = con2prim(eos, in, opts, s_guess, w_guess, u_guess)
-    res = base.result
-    it_n, it_f = base.iters_newton, base.iters_fallback
-    u_warm = base.eos.u_solved
-
-    if res === C2PResult.converged_newton || res === C2PResult.converged_fallback
-        # 3. Cap the rapidity first, preserving D exactly, then project.
-        w_cap = pol_w_cap(pol)
-        ps = PrimState{T}(base.ρ, base.s, base.ye, base.w)
-        pre = UInt32(0)
-        if isfinite(base.w) && base.w > w_cap
-            pre = FLAG_POL_W_CAPPED
-            ps = PrimState{T}(in.D / cosh(w_cap), base.s, base.ye, w_cap)
-        end
-        ps, pf = project_prim_state(eos, ps, pol)
-        pf |= pre
-
-        if pf == 0
-            # Already valid: hand back the input conservatives untouched, rather
-            # than a round trip through prim2con that would perturb them.
-            return Con2PrimSafeOut{T}(base, Prim2ConOut{T}(in.D, in.τ, in.D_Y, in.S_par, in.S_perp, in.B²),
-                                      UInt32(0), true)
-        end
-        nb, cons = pol_package(eos, ps, in.S_par, in.S_perp, B², u_warm)
-        return Con2PrimSafeOut{T}(Con2PrimOut{T}(nb.ρ, nb.s, nb.ye, nb.w, nb.W, nb.v_par, nb.v_perp,
-                                                 nb.eos, res, it_n, it_f, nb.flags), cons, pf, true)
-    end
-
-    # 4. The solve failed: diagnose with the outer function's own endpoints.
-    w_ref = isfinite(base.w) ? clamp(base.w, zero(T), opts.w_max) : zero(T)
-    y_lo, y_hi = yₑ_bounds(eos)
-    ye_c = clamp(ye_in, T(y_lo), T(y_hi))
-    ρ_ref = in.D / cosh(w_ref)
-    sr_ref = srange(eos, ρ_ref, ye_c)
-
-    r_lo, _ = inner_solve_w(eos, in.D, in.τ, ye_in, in.S_par, in.S_perp, B², sr_ref.s_min, opts.w_max,
-                            opts.τ_floor_rel, w_ref, u_warm, opts.max_iter_1d, opts.tol)
-    if isfinite(r_lo.f2) && r_lo.f2 > zero(T)
-        # τ sits below the coldest state compatible with this momentum: floor
-        # the entropy onto the physical minimum.
-        #
-        # The clamps on w and ρ here leave a state that `project_prim_state`
-        # finds already in range, so they have to report themselves. Raising ρ
-        # is the one that matters to a caller: ρ·cosh w then exceeds D, and the
-        # repair has added rest mass and momentum.
-        pf = FLAG_POL_S_FLOORED
-        w_cap = pol_w_cap(pol)
-        w1 = zero(T)
-        if isfinite(r_lo.w)
-            w1 = clamp(r_lo.w, zero(T), w_cap)
-            w1 == r_lo.w || (pf |= FLAG_POL_W_CAPPED)
-        end
-        ρ_lo = pol_ρ_atm(eos, pol)
-        ρ_hi = pol_ρ_ceiling(eos, pol)
-        ρ1 = in.D / cosh(w1)
-        if ρ1 < ρ_lo
-            ρ1 = ρ_lo
-            pf |= FLAG_POL_ρ_FLOORED
-        elseif ρ1 > ρ_hi
-            ρ1 = ρ_hi
-            pf |= FLAG_POL_ρ_CEILED
-        end
-        sr1 = srange(eos, ρ1, ye_c)
-        ps, pf1 = project_prim_state(eos, PrimState{T}(ρ1, sr1.s_min, ye_in, w1), pol)
-        pf |= pf1
-        nb, cons = pol_package(eos, ps, in.S_par, in.S_perp, B², r_lo.pt.u_solved)
-        return Con2PrimSafeOut{T}(Con2PrimOut{T}(nb.ρ, nb.s, nb.ye, nb.w, nb.W, nb.v_par, nb.v_perp,
-                                                 nb.eos, res, it_n, it_f, nb.flags), cons, pf, true)
-    end
-
-    r_hi, _ = inner_solve_w(eos, in.D, in.τ, ye_in, in.S_par, in.S_perp, B², sr_ref.s_max, opts.w_max,
-                            opts.τ_floor_rel, r_lo.w, r_lo.pt.u_solved, opts.max_iter_1d, opts.tol)
-    if isfinite(r_hi.f2) && r_hi.f2 < zero(T)
-        base2, cons, flags = pol_collapse(eos, pol, in, ye_in, B²)
-        return Con2PrimSafeOut{T}(Con2PrimOut{T}(base2.ρ, base2.s, base2.ye, base2.w, base2.W,
-                                                 base2.v_par, base2.v_perp, base2.eos, res, it_n, it_f,
-                                                 base2.flags), cons, flags, true)
-    end
-
-    # Neither diagnosis fits: excise.
-    ps = policy_atmosphere(eos, pol, ye_in)
-    nb, cons = pol_package(eos, ps, in.S_par, in.S_perp, B², r_hi.pt.u_solved)
-    return Con2PrimSafeOut{T}(Con2PrimOut{T}(nb.ρ, nb.s, nb.ye, nb.w, nb.W, nb.v_par, nb.v_perp, nb.eos,
-                                             res, it_n, it_f, nb.flags), cons, FLAG_POL_ATMOSPHERE, true)
+    b = out.base
+    return package_out(eos, PrimState{T}(ρ_min, s, yₑ, zero(T)), in, B², T(NaN), b.result, b.iters_newton,
+                       b.iters_fallback, f | FLAG_POL_ATMOSPHERE, out.solved)
 end

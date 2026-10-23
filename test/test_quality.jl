@@ -15,7 +15,8 @@ _jet_bs(v, x, u, y) = EntropyEOS.bspline_eval3(v, x, u, y)
 _jet_eval(v, ρ, s, y, u) = EntropyEOS.evaluate(v, ρ, s, y, u)
 _jet_p2c(v, ρ, s, y, w, b, c, u) = EntropyEOS.prim2con(v, ρ, s, y, w, b, c, u)
 _jet_c2p(v, cin, o) = EntropyEOS.con2prim(v, cin, o)
-_jet_safe(v, cin, o, pol) = EntropyEOS.con2prim_safe(v, cin, o, pol)
+_jet_safe(v, cin, o, proj) = EntropyEOS.con2prim_safe(v, cin, o, proj)
+_jet_policy(v, cin, out, proj, pol) = EntropyEOS.apply_policy(v, cin, out, proj, pol)
 
 @testset "quality" begin
     @testset "Aqua" begin
@@ -47,7 +48,9 @@ _jet_safe(v, cin, o, pol) = EntropyEOS.con2prim_safe(v, cin, o, pol)
             @test isempty(JET.get_reports(JET.report_opt(_jet_p2c, (V, F, F, F, F, F, F, F))))
             @test isempty(JET.get_reports(JET.report_opt(_jet_c2p, (V, Con2PrimIn{F}, Con2PrimOptions{F}))))
             @test isempty(JET.get_reports(JET.report_opt(_jet_safe,
-                (V, Con2PrimIn{F}, Con2PrimOptions{F}, PolicyOptions{F}))))
+                (V, Con2PrimIn{F}, Con2PrimOptions{F}, ProjectionOptions{F}))))
+            @test isempty(JET.get_reports(JET.report_opt(_jet_policy,
+                (V, Con2PrimIn{F}, Con2PrimSafeOut{F}, ProjectionOptions{F}, PolicyOptions{F}))))
             # The analytic EOSs run the same solver, and must be as clean.
             for A in (typeof(IdealGasEOS(; Γ=2.0, K_ref=100.0, s_ref=5.0, s_window=(1.0, 20.0),
                                          ρ_bounds=(1e-10, 1e-2), yₑ_bounds=(0.0, 1.0))),
@@ -57,7 +60,9 @@ _jet_safe(v, cin, o, pol) = EntropyEOS.con2prim_safe(v, cin, o, pol)
                 @test isempty(JET.get_reports(JET.report_opt(_jet_eval, (A, F, F, F, F))))
                 @test isempty(JET.get_reports(JET.report_opt(_jet_c2p, (A, Con2PrimIn{F}, Con2PrimOptions{F}))))
                 @test isempty(JET.get_reports(JET.report_opt(_jet_safe,
-                    (A, Con2PrimIn{F}, Con2PrimOptions{F}, PolicyOptions{F}))))
+                    (A, Con2PrimIn{F}, Con2PrimOptions{F}, ProjectionOptions{F}))))
+                @test isempty(JET.get_reports(JET.report_opt(_jet_policy,
+                    (A, Con2PrimIn{F}, Con2PrimSafeOut{F}, ProjectionOptions{F}, PolicyOptions{F}))))
             end
         else
             @info "JET analysis skipped on Julia $VERSION"

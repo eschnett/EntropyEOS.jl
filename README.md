@@ -40,8 +40,10 @@ relations.
 On top of that sits a `prim2con`/`con2prim` pair that iterates on **entropy**
 and **rapidity**. Both choices remove constraints from the iterate space: any
 `(s, w)` inside the table domain is a physical state, and rapidity is well
-conditioned both as `v → 0` and as `v → 1`. A policy layer above it never
-fails, returning a valid and exactly solvable state for any input at all.
+conditioned both as `v → 0` and as `v → 1`. Above it sit two levels. A
+projection never fails: for any input at all it returns the closest valid,
+exactly solvable state, and flags each bound it hit. A separate, replaceable
+policy then decides what such a state should become, such as the atmosphere.
 
 ## Usage
 
@@ -55,7 +57,8 @@ report.status === Status.fatal && error("broken table")
 
 eos = build_eos(table)
 v = EOSTableView(eos)                    # small, immutable, device-ready
-pol = default_policy(v, 1e3 * v.κ)       # atmosphere and collapse ceilings
+proj = default_projection(v, 1e3 * v.κ)  # the valid range: ρ_min, ρ_max, w_cap
+pol = PolicyOptions()                    # what goes to the atmosphere
 
 # A valid primitive state. Note that ρ is ρ* = κ·ρ, in κ-rescaled g/cm³.
 ρ, yₑ, w = exp10(0.5 * (v.x_lo + v.x_hi)), 0.4, 0.8
@@ -70,8 +73,10 @@ c = prim2con(v, ρ, s, yₑ, w, 0.1ρ, 0.3, pt.u_solved)
 cons = Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²)
 rec = con2prim(v, cons, Con2PrimOptions(), s, w, pt.u_solved)   # warm-started
 
-# The path that never fails, for any input at all.
-safe = con2prim_safe(v, cons, Con2PrimOptions(), pol)
+# The path that never fails, for any input at all: project, then apply the
+# physics. Replace `apply_policy` with your own rules if they differ.
+safe = con2prim_safe(v, cons, Con2PrimOptions(), proj)
+safe = apply_policy(v, cons, safe, proj, pol)
 safe.policy_flags & FLAG_POL_ANY == 0 || @info "state repaired; adopt safe.cons"
 ```
 
@@ -90,7 +95,7 @@ interchangeable across it.
 
 ### Analytic EOSs
 
-The solver and the policy layer are written against `AbstractEOS`, not the
+The solver and both policy levels are written against `AbstractEOS`, not the
 table. Two closed-form EOSs implement it: `IdealGasEOS`, a Γ-law gas whose
 polytrope `p = Kρ^Γ` is one entropy (`polytropic_entropy`), and `HybridEOS`, a
 cold piecewise polytrope plus a thermal ideal gas. The cold part is the
@@ -101,7 +106,7 @@ continuous at the breaks.
 eos = IdealGasEOS(; Γ=2.0, K_ref=100.0, s_ref=5.0, s_window=(1.0, 20.0),
                   ρ_bounds=(1e-12, 1e-2), yₑ_bounds=(0.0, 1.0))
 s = polytropic_entropy(eos, 100.0)          # the TOV polytrope p = 100 ρ²
-out = con2prim_safe(eos, cons, Con2PrimOptions(), default_policy(eos, 1e-10))
+out = con2prim_safe(eos, cons, Con2PrimOptions(), default_projection(eos, 1e-10))
 ```
 
 Both are `isbits` and go into a GPU kernel as they are. They have κ = 1, so
@@ -135,8 +140,13 @@ page has the measurements. The GPU testset is described in
 ## Status
 
 The run-time path is complete and tested: table loading and checking, the
-B-spline fit, the adapter, `prim2con`, `con2prim`, and the never-fails policy
-layer, plus the analytic EOSs. Roughly 32,000 assertions pass.
+B-spline fit, the adapter, `prim2con`, `con2prim`, the projection that never
+fails and the policy on top of it, plus the analytic EOSs. Roughly 32,000
+assertions pass.
+
+Version 2.0.0 replaced 1.x's single policy layer by these two levels, which
+changes outputs, flags and `PolicyOptions`; see
+[CODE.md § State policy](CODE.md#state-policy).
 
 All five real tables are exercised end to end — LS220, the SRO LS220
 re-tabulation, DD2 (original and repaired) and SFHo — covering grids from

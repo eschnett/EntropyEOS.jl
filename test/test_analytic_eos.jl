@@ -3,7 +3,7 @@
 # Allocation probes at top level; see test/testutil.jl.
 _an_eval(eos, ρ, s, y, u) = EntropyEOS.evaluate(eos, ρ, s, y, u).U
 _an_c2p(eos, cin, opts) = EntropyEOS.con2prim(eos, cin, opts).ρ
-_an_safe(eos, cin, opts, pol) = EntropyEOS.con2prim_safe(eos, cin, opts, pol).base.ρ
+_an_safe(eos, cin, opts, proj) = EntropyEOS.con2prim_safe(eos, cin, opts, proj).base.ρ
 function _an_eval_allocs(eos, ρ, s, y, u)
     _an_eval(eos, ρ, s, y, u)
     return @allocated _an_eval(eos, ρ, s, y, u)
@@ -12,9 +12,9 @@ function _an_c2p_allocs(eos, cin, opts)
     _an_c2p(eos, cin, opts)
     return @allocated _an_c2p(eos, cin, opts)
 end
-function _an_safe_allocs(eos, cin, opts, pol)
-    _an_safe(eos, cin, opts, pol)
-    return @allocated _an_safe(eos, cin, opts, pol)
+function _an_safe_allocs(eos, cin, opts, proj)
+    _an_safe(eos, cin, opts, proj)
+    return @allocated _an_safe(eos, cin, opts, proj)
 end
 
 """
@@ -108,7 +108,7 @@ number per quantity.
 function round_trip(eos, n; T=Float64, cold=false, seed=1, w_max=acosh(10.0))
     rng = StableRNG(seed)
     opts = Con2PrimOptions{T}()
-    pol = default_policy(eos, T(exp10(first(logρ_bounds(eos)))))
+    proj = default_projection(eos, T(exp10(first(logρ_bounds(eos)))))
     x_lo, x_hi = logρ_bounds(eos)
     nfail = ntouched = 0
     eρ, es = Float64[], Float64[]
@@ -123,8 +123,8 @@ function round_trip(eos, n; T=Float64, cold=false, seed=1, w_max=acosh(10.0))
         pt = evaluate(eos, ρ, s, T(0.5), T(NaN))
         c = prim2con(eos, ρ, s, T(0.5), w, B², T(2rand(rng) - 1), pt.u_solved)
         cin = Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²)
-        out = cold ? con2prim_safe(eos, cin, opts, pol) :
-              con2prim_safe(eos, cin, opts, pol, s * T(1 + 1e-3), w * T(1 + 1e-3), T(NaN))
+        out = cold ? con2prim_safe(eos, cin, opts, proj) :
+              con2prim_safe(eos, cin, opts, proj, s * T(1 + 1e-3), w * T(1 + 1e-3), T(NaN))
         r = out.base.result
         (r === EntropyEOS.C2PResult.converged_newton || r === EntropyEOS.C2PResult.converged_fallback) ||
             (nfail += 1)
@@ -154,13 +154,14 @@ end
     @testset "a toy EOS implementing only the contract runs the whole solver" begin
         toy = ToyEOS()
         opts = Con2PrimOptions()
-        pol = default_policy(toy, 1e-8)
-        @test pol.ρ_ceiling ≈ 1e-2
+        proj = default_projection(toy, 1e-8)
+        @test proj.ρ_max ≈ 1e-2
         r = round_trip(toy, 300; cold=true)
         @test r.nfail == 0 && r.ntouched == 0
         @test r.eρ < 1e-11 && r.es < 1e-10
-        out = con2prim_safe(toy, Con2PrimIn(1e-5, 1e-30, 0.0, 0.0, 0.0, 0.0), opts, pol)
-        @test out.policy_flags & FLAG_POL_S_FLOORED != 0
+        out = con2prim_safe(toy, Con2PrimIn(1e-5, 1e-30, 0.0, 0.0, 0.0, 0.0), opts, proj)
+        @test out.policy_flags == FLAG_POL_S_FLOORED
+        @test isempty(policy_violations(toy, proj, opts, Con2PrimIn(1e-5, 1e-30, 0.0, 0.0, 0.0, 0.0), out))
     end
 
     @testset "ideal gas" begin
@@ -277,38 +278,28 @@ end
         end
     end
 
-    @testset "policy" begin
+    @testset "projection" begin
         for eos in (ideal_gas(2.0), sly_hybrid())
             x_lo, x_hi = logρ_bounds(eos)
-            ρ_atm = exp10(x_lo + 1)
-            pol = default_policy(eos, ρ_atm)
+            ρ_min = exp10(x_lo + 1)
+            proj = default_projection(eos, ρ_min)
             opts = Con2PrimOptions()
-            @test pol.ρ_ceiling ≈ exp10(x_hi)
-            @test pol.τ_max > 0 && isfinite(pol.τ_max)
+            @test proj.ρ_max ≈ exp10(x_hi)
 
-            # Every repair must be invertible: the plain solver, re-run on the
-            # returned conservatives, reproduces the returned primitives.
-            function accept(out)
-                b = out.base
-                check_prim_state(eos, PrimState(b.ρ, b.s, b.ye, b.w), pol) == 0 || return false
-                c = out.cons
-                re = con2prim(eos, Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²), opts, b.s, b.w, NaN)
-                return (re.result === E.C2PResult.converged_newton || re.result === E.C2PResult.converged_fallback) &&
-                       abs(re.ρ - b.ρ) / b.ρ < 1e-9 && abs(re.s - b.s) / b.s < 1e-9
-            end
             ρ = exp10(0.5 * (x_lo + x_hi))
             sr = srange(eos, ρ, 0.5)
             g = let c = prim2con(eos, ρ, 0.5 * (sr.s_min + sr.s_max), 0.5, 0.8, 0.0, 0.0, NaN)
                 Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²)
             end
-            for cin in (Con2PrimIn(g.D, NaN, g.D_Y, g.S_par, g.S_perp, g.B²),         # non-finite
-                        Con2PrimIn(ρ_atm * 1e-3, g.τ * 1e-20, 0.0, 0.0, 0.0, 0.0),     # vacuum
-                        Con2PrimIn(g.D, g.τ * 1e-10, g.D_Y, g.S_par, g.S_perp, g.B²),  # too cold
-                        Con2PrimIn(g.D, g.τ, g.D_Y, 1e30, 0.0, g.B²),                  # superluminal
-                        Con2PrimIn(1e30, g.τ, 0.5e30, g.S_par, g.S_perp, g.B²))        # collapse
-                out = con2prim_safe(eos, cin, opts, pol)
-                @test out.policy_flags != 0
-                @test accept(out)
+            for (cin, bit) in ((Con2PrimIn(g.D, NaN, g.D_Y, g.S_par, g.S_perp, g.B²), FLAG_POL_NONFINITE),
+                               (Con2PrimIn(ρ_min * 1e-3, g.τ * 1e-20, 0.0, 0.0, 0.0, 0.0), FLAG_POL_ρ_FLOORED),
+                               (Con2PrimIn(g.D, g.τ * 1e-10, g.D_Y, g.S_par, g.S_perp, g.B²), FLAG_POL_S_FLOORED),
+                               (Con2PrimIn(g.D, g.τ * 1e6, g.D_Y, g.S_par, g.S_perp, g.B²), FLAG_POL_S_CEILED),
+                               (Con2PrimIn(g.D, g.τ, g.D_Y, 1e30, 0.0, g.B²), FLAG_POL_W_CEILED),
+                               (Con2PrimIn(1e30, g.τ, 0.5e30, g.S_par, g.S_perp, g.B²), FLAG_POL_ρ_CEILED))
+                out = con2prim_safe(eos, cin, opts, proj)
+                @test out.policy_flags & bit == bit
+                @test isempty(policy_violations(eos, proj, opts, cin, out))
             end
 
             # Projection is bitwise idempotent, over and outside the box.
@@ -316,9 +307,9 @@ end
             for _ in 1:300
                 ps = PrimState(exp10(x_lo - 1 + (x_hi - x_lo + 2) * rand(rng)), 25rand(rng) - 2,
                                1.2rand(rng) - 0.1, 5rand(rng))
-                ps2, flags = project_prim_state(eos, ps, pol)
-                @test flags == check_prim_state(eos, ps, pol)
-                ps3, flags3 = project_prim_state(eos, ps2, pol)
+                ps2, flags = project_prim_state(eos, ps, proj)
+                @test flags == check_prim_state(eos, ps, proj)
+                ps3, flags3 = project_prim_state(eos, ps2, proj)
                 @test ps3 === ps2 && flags3 == 0
             end
         end
@@ -327,7 +318,7 @@ end
     @testset "device readiness" begin
         for eos in (ideal_gas(5 / 3), sly_hybrid())
             opts = Con2PrimOptions()
-            pol = default_policy(eos, exp10(first(logρ_bounds(eos)) + 1))
+            proj = default_projection(eos, exp10(first(logρ_bounds(eos)) + 1))
             ρ = exp10(sum(logρ_bounds(eos)) / 2)
             c = prim2con(eos, ρ, 10.0, 0.5, 0.8, 0.1ρ, 0.3, NaN)
             cin = Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²)
@@ -337,10 +328,11 @@ end
             @test Adapt.adapt(Array, eos) === eos
             @inferred evaluate(eos, ρ, 10.0, 0.5, NaN)
             @inferred con2prim(eos, cin, opts)
-            @inferred con2prim_safe(eos, cin, opts, pol)
+            out = @inferred con2prim_safe(eos, cin, opts, proj)
+            @inferred apply_policy(eos, cin, out, proj, PolicyOptions())
             @test_noallocs _an_eval_allocs(eos, ρ, 10.0, 0.5, NaN)
             @test_noallocs _an_c2p_allocs(eos, cin, opts)
-            @test_noallocs _an_safe_allocs(eos, cin, opts, pol)
+            @test_noallocs _an_safe_allocs(eos, cin, opts, proj)
 
             e32 = narrow(eos, Float32)
             @test eltype(e32) === Float32 && isbits(e32)

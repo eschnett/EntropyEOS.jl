@@ -1,7 +1,8 @@
 # Allocation probes at top level; see the note in test_adapter_tail.jl.
 _dev_eval(v, ρ, s, y, u) = EntropyEOS.evaluate(v, ρ, s, y, u).U
 _dev_c2p(v, cin, opts) = EntropyEOS.con2prim(v, cin, opts).ρ
-_dev_safe(v, cin, opts, pol) = EntropyEOS.con2prim_safe(v, cin, opts, pol).base.ρ
+_dev_safe(v, cin, opts, proj) = EntropyEOS.con2prim_safe(v, cin, opts, proj).base.ρ
+_dev_policy(v, cin, out, proj, pol) = EntropyEOS.apply_policy(v, cin, out, proj, pol).base.ρ
 # One helper per entry point rather than a varargs `_allocs(f, args...)`: the
 # splat itself allocates on x86-64, and the measurement then reports the
 # harness instead of the kernel.
@@ -13,9 +14,13 @@ function _dev_c2p_allocs(v, cin, opts)
     _dev_c2p(v, cin, opts)
     return @allocated _dev_c2p(v, cin, opts)
 end
-function _dev_safe_allocs(v, cin, opts, pol)
-    _dev_safe(v, cin, opts, pol)
-    return @allocated _dev_safe(v, cin, opts, pol)
+function _dev_safe_allocs(v, cin, opts, proj)
+    _dev_safe(v, cin, opts, proj)
+    return @allocated _dev_safe(v, cin, opts, proj)
+end
+function _dev_policy_allocs(v, cin, out, proj, pol)
+    _dev_policy(v, cin, out, proj, pol)
+    return @allocated _dev_policy(v, cin, out, proj, pol)
 end
 
 @testset "device readiness" begin
@@ -24,7 +29,8 @@ end
     eos = E.build_eos(tbl)
     v = EOSTableView(eos)
     opts = Con2PrimOptions()
-    pol = default_policy(v, 1e3 * v.κ)
+    proj = default_projection(v, 1e3 * v.κ)
+    pol = PolicyOptions()
 
     ρ = exp10(0.5 * (v.x_lo + v.x_hi))
     yₑ = 0.35
@@ -45,6 +51,7 @@ end
         @test isbitstype(Con2PrimIn{Float64})
         @test isbitstype(Con2PrimOptions{Float64})
         @test isbitstype(Con2PrimOut{Float64})
+        @test isbitstype(ProjectionOptions{Float64})
         @test isbitstype(PolicyOptions{Float64})
         @test isbitstype(PrimState{Float64})
         @test isbitstype(Con2PrimSafeOut{Float64})
@@ -93,13 +100,25 @@ end
         # gates that keep the port device-ready.
         @test_noallocs _dev_eval_allocs(v, ρ, s, yₑ, NaN)
         @test_noallocs _dev_c2p_allocs(v, cin, opts)
-        @test_noallocs _dev_safe_allocs(v, cin, opts, pol)
+        @test_noallocs _dev_safe_allocs(v, cin, opts, proj)
+        # The projection's face solves, not only the already-valid exit: too
+        # hot, too cold, too dense, below ρ_min, non-finite.
+        for bad in (Con2PrimIn(cin.D, 1e6 * cin.τ, cin.D_Y, cin.S_par, cin.S_perp, cin.B²),
+                    Con2PrimIn(cin.D, 1e-10 * cin.τ, cin.D_Y, cin.S_par, cin.S_perp, cin.B²),
+                    Con2PrimIn(1e30, cin.τ, 0.35e30, cin.S_par, cin.S_perp, cin.B²),
+                    Con2PrimIn(1e-3 * v.κ, cin.τ, 0.35e-3 * v.κ, cin.S_par, cin.S_perp, cin.B²),
+                    Con2PrimIn(cin.D, NaN, cin.D_Y, cin.S_par, cin.S_perp, cin.B²))
+            @test_noallocs _dev_safe_allocs(v, bad, opts, proj)
+            @test_noallocs _dev_policy_allocs(v, bad, con2prim_safe(v, bad, opts, proj), proj, pol)
+        end
     end
 
     @testset "type-stable at Float64 and Float32" begin
         @test (@inferred evaluate(v, ρ, s, yₑ, NaN)) isa EOSPoint{Float64}
         @test (@inferred con2prim(v, cin, opts)) isa Con2PrimOut{Float64}
-        @test (@inferred con2prim_safe(v, cin, opts, pol)) isa Con2PrimSafeOut{Float64}
+        out = @inferred con2prim_safe(v, cin, opts, proj)
+        @test out isa Con2PrimSafeOut{Float64}
+        @test (@inferred apply_policy(v, cin, out, proj, pol)) isa Con2PrimSafeOut{Float64}
 
         v32 = E.narrow(v, Float32)
         @test v32 isa EOSTableView{Float32}
@@ -112,6 +131,8 @@ end
         # is explicitly not validated, but the plumbing has to run.
         @test opts32.tol > eps(Float32)
         @test isfinite(con2prim(v32, cin32, opts32).ρ)
+        proj32 = default_projection(v32, Float32(1e3 * v.κ))
+        @test (@inferred con2prim_safe(v32, cin32, opts32, proj32)) isa Con2PrimSafeOut{Float32}
     end
 
     @testset "no hidden mutable state" begin

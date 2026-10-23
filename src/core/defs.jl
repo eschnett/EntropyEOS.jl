@@ -22,33 +22,30 @@ const FLAG_EXT_ρ_LOW    = UInt32(1) << 3   # point used the low-density extensi
 const FLAG_OOB_ρ_HIGH   = UInt32(1) << 4   # ρ above the table's high edge (no extension)
 const FLAG_MAXITER      = UInt32(1) << 5   # the inner T-solve hit its iteration cap
 
-# Bits 8-16: what the *policy layer* did to a state. Kept separate from the
+# Bits 8-17: what the *policy layer* did to a state. Kept separate from the
 # bits above so a caller can distinguish "the table extension was used" from
-# "the state was repaired or excised" by masking. Bit 16 was added after the
-# byte 8-15 filled up; the group is still contiguous.
-const FLAG_POL_ATMOSPHERE = UInt32(1) << 8    # whole state replaced by the atmosphere
-const FLAG_POL_CEILING    = UInt32(1) << 9    # a collapse ceiling was exceeded
-const FLAG_POL_S_FLOORED  = UInt32(1) << 10   # s raised to the physical srange minimum
-const FLAG_POL_S_CEILED   = UInt32(1) << 11   # s lowered to the physical srange maximum
-const FLAG_POL_W_CAPPED   = UInt32(1) << 12   # rapidity clamped into [0, w_cap]
-const FLAG_POL_ρ_CEILED   = UInt32(1) << 13   # ρ lowered to ρ_ceiling: rest mass removed
-const FLAG_POL_YE_CLAMPED = UInt32(1) << 14   # Yₑ clamped into the table's range
-const FLAG_POL_NONFINITE  = UInt32(1) << 15   # non-finite (or D <= 0) input was seen
-const FLAG_POL_ρ_FLOORED  = UInt32(1) << 16   # ρ raised to ρ_atm without an atmosphere reset: rest mass added
-
-"""
-Either density clamp: `FLAG_POL_ρ_FLOORED | FLAG_POL_ρ_CEILED`. Two bits, so
-test it with `flags & FLAG_POL_ρ_CLAMPED != 0`, not with `==`.
-"""
-const FLAG_POL_ρ_CLAMPED = FLAG_POL_ρ_FLOORED | FLAG_POL_ρ_CEILED
+# "the state was repaired or replaced" by masking. Bit 8 is level 2's
+# (`apply_policy`); the rest are level 1's (`con2prim_safe`). Each face of the
+# valid range has its own bit, named for the bound it hit: FLOORED for a lower
+# bound, CEILED for an upper one.
+const FLAG_POL_ATMOSPHERE    = UInt32(1) << 8    # level 2 replaced the state by the atmosphere
+const FLAG_POL_NONFINITE     = UInt32(1) << 9    # non-finite input, D <= 0 or B² < 0: no closest valid state
+const FLAG_POL_NOT_CONVERGED = UInt32(1) << 10   # the solve failed, but a valid state lies inside the range
+const FLAG_POL_ρ_FLOORED     = UInt32(1) << 11   # ρ on ρ_min: S lowered, D raised if below ρ_min
+const FLAG_POL_ρ_CEILED      = UInt32(1) << 12   # ρ on ρ_max: D lowered, rest mass removed
+const FLAG_POL_YE_FLOORED    = UInt32(1) << 13   # Yₑ on the table's lower bound
+const FLAG_POL_YE_CEILED     = UInt32(1) << 14   # Yₑ on the table's upper bound
+const FLAG_POL_S_FLOORED     = UInt32(1) << 15   # s on the physical window's minimum: τ raised
+const FLAG_POL_S_CEILED      = UInt32(1) << 16   # s on the physical window's maximum: τ lowered
+const FLAG_POL_W_CEILED      = UInt32(1) << 17   # w on w_cap: S lowered
 
 """
 Mask of every policy bit: `flags & FLAG_POL_ANY` answers "did the policy layer
 touch this point?" without enumerating the bits.
 """
-const FLAG_POL_ANY = FLAG_POL_ATMOSPHERE | FLAG_POL_CEILING | FLAG_POL_S_FLOORED |
-                     FLAG_POL_S_CEILED | FLAG_POL_W_CAPPED | FLAG_POL_ρ_CEILED |
-                     FLAG_POL_YE_CLAMPED | FLAG_POL_NONFINITE | FLAG_POL_ρ_FLOORED
+const FLAG_POL_ANY = FLAG_POL_ATMOSPHERE | FLAG_POL_NONFINITE | FLAG_POL_NOT_CONVERGED |
+                     FLAG_POL_ρ_FLOORED | FLAG_POL_ρ_CEILED | FLAG_POL_YE_FLOORED |
+                     FLAG_POL_YE_CEILED | FLAG_POL_S_FLOORED | FLAG_POL_S_CEILED | FLAG_POL_W_CEILED
 
 # ---------------------------------------------------------------------------
 # Outcome enums
@@ -161,6 +158,33 @@ argument only has to be harmless, not meaningful.
 @inline tau_floor_rel(::Type{Float64}) = 1.0e-16
 @inline tau_floor_rel(::Type{T}) where {T<:AbstractFloat} = max(T(1.0e-16), eps(T))
 @inline tau_floor_rel(::Type{T}) where {T<:Real} = T(tau_floor_rel(Float64))
+
+"""
+Slack with which the projection tests a face, relative to the value for ρ and w
+and to the window's width for s. A state written onto a face comes back from
+the solver only to its conditioning, so without the slack the face would fire
+again and no output on a face would be a fixed point.
+
+The `Float64` value is measured: a cold re-solve of a projected state lands past
+its face by its conditioning, below 10⁻⁸ for 99% of states on most tables; the
+tail beyond that is a cold start finding another root, which no slack covers
+(CODE.md, "The contract", has the table). Four times the solver's tolerance,
+4·10⁻¹², covered only a re-solve warm-started at the output.
+"""
+@inline face_slack(::Type{Float64}) = 1.0e-7
+@inline face_slack(::Type{T}) where {T<:AbstractFloat} = max(T(4) * con2prim_tol(T), T(1.0e-7))
+@inline face_slack(::Type{T}) where {T<:Real} = T(face_slack(Float64))
+
+"""
+The energy residual beyond which `check_con_state` reports an entropy face. At
+`Float64` it is the solver's tolerance. At `Float32` the residual is noise at up
+to ~65 times that, where τ cannot resolve the thermal energy, and a smaller bar
+reported faces that `con2prim_safe` does not set (measured 2026-10-23, synthetic
+table and ideal gas, states on the window's edges); 128 times it is above that.
+"""
+@inline check_f2_tol(::Type{Float64}) = con2prim_tol(Float64)
+@inline check_f2_tol(::Type{T}) where {T<:AbstractFloat} = T(128) * con2prim_tol(T)
+@inline check_f2_tol(::Type{T}) where {T<:Real} = T(check_f2_tol(Float64))
 
 """Residual tolerance factor for the inner T-solve: `|g| <= tol * max(|s|, 1)`."""
 @inline tsolve_residual_tol(::Type{Float64}) = 1.0e-12

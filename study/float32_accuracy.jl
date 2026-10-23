@@ -304,14 +304,14 @@ function c2p_study(name, v64, v32; logT)
                 n / tt / Threads.nthreads() / 1e6)
     end
 
-    # The never-fails layer at Float32: its contract (finite output, and the
-    # returned conservatives re-solve to the returned primitives) must hold.
-    pol32 = default_policy(v32, exp10(Float32(v32.x_lo)))
+    # The projection at Float32: its contract (finite output, and the returned
+    # conservatives re-solve to the returned primitives) must hold.
+    proj32 = default_projection(v32, exp10(Float32(v32.x_lo)))
     nbad = Threads.Atomic{Int}(0)
     resolve = Vector{Float64}(undef, n)
     nflag = Threads.Atomic{Int}(0)
     Threads.@threads :static for k in 1:n
-        sa = con2prim_safe(v32, cin32[k], o32, pol32)
+        sa = con2prim_safe(v32, cin32[k], o32, proj32)
         fin = isfinite(sa.base.ρ) && isfinite(sa.base.s) && isfinite(sa.base.w) && isfinite(sa.cons.τ)
         fin || Threads.atomic_add!(nbad, 1)
         sa.policy_flags != 0 && Threads.atomic_add!(nflag, 1)

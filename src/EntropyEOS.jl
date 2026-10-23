@@ -10,7 +10,8 @@ Three layers, each built on the one below:
     thermodynamic potential `U(ρ, s, Yₑ)`, with every derivative a solver
     needs;
   * a `prim2con`/`con2prim` pair over that potential, using entropy and
-    rapidity as iteration variables, plus a policy layer that never fails.
+    rapidity as iteration variables, plus a projection onto the valid range
+    that never fails, and a replaceable physics policy on top of it.
 
 The solver is written against [`AbstractEOS`](@ref), so it runs equally on two
 closed-form EOSs: [`IdealGasEOS`](@ref) and [`HybridEOS`](@ref), the latter a
@@ -48,6 +49,7 @@ include("core/adapt.jl")
 include("core/analytic_eos.jl")
 include("core/prim2con.jl")
 include("core/con2prim.jl")
+include("core/faces.jl")
 include("core/state_policy.jl")
 
 # Host-side: owns memory, may throw, never needed on a device.
@@ -66,9 +68,9 @@ export
     # Flags and outcomes
     FLAG_CLAMP_YE, FLAG_EXT_S_LOW, FLAG_EXT_S_HIGH, FLAG_EXT_ρ_LOW,
     FLAG_OOB_ρ_HIGH, FLAG_MAXITER,
-    FLAG_POL_ATMOSPHERE, FLAG_POL_CEILING, FLAG_POL_S_FLOORED, FLAG_POL_S_CEILED,
-    FLAG_POL_W_CAPPED, FLAG_POL_ρ_FLOORED, FLAG_POL_ρ_CEILED, FLAG_POL_ρ_CLAMPED,
-    FLAG_POL_YE_CLAMPED, FLAG_POL_NONFINITE, FLAG_POL_ANY,
+    FLAG_POL_ATMOSPHERE, FLAG_POL_NONFINITE, FLAG_POL_NOT_CONVERGED,
+    FLAG_POL_ρ_FLOORED, FLAG_POL_ρ_CEILED, FLAG_POL_YE_FLOORED, FLAG_POL_YE_CEILED,
+    FLAG_POL_S_FLOORED, FLAG_POL_S_CEILED, FLAG_POL_W_CEILED, FLAG_POL_ANY,
     Status, C2PResult,
     # B-splines
     BsplineView1, BsplineView3, BsplineEval1, BsplineEval3,
@@ -82,8 +84,8 @@ export
     evaluate, eval_at, srange, srange_extended, sigma_extended, u_high_tail_info,
     # Solver
     Prim2ConOut, Con2PrimIn, Con2PrimOptions, Con2PrimOut, prim2con, con2prim,
-    PolicyOptions, PrimState, Con2PrimSafeOut, con2prim_safe,
-    default_policy, policy_derive_bounds, policy_atmosphere,
+    ProjectionOptions, PolicyOptions, PrimState, Con2PrimSafeOut,
+    default_projection, con2prim_safe, apply_policy,
     check_prim_state, project_prim_state, check_con_state,
     # Tables
     RawTable, validate_axes, add_field!, has_field, field, field_names,

@@ -1,5 +1,5 @@
-# Behaviour study: where con2prim fails on valid states, what 1.1.0's
-# con2prim_safe makes of them, and whether a bisection in s rescues them
+# Behaviour study: where con2prim fails on valid states, what con2prim_safe
+# (the projection, level 1) makes of them, and whether a bisection in s rescues them
 # (CODE.md, "Two-level projection (proposed)", on NOT_CONVERGED).
 #
 # The states are those of `test/test_real_tables.jl`: valid primitives inside a
@@ -12,7 +12,7 @@
 #   - bisected in s on G(s) = f₂ at the inner root, bracketed by the physical
 #     window at the failed solve's density (as the diagnosis takes it) and at
 #     the true density;
-#   - passed to con2prim_safe with `default_policy`, to see its flags.
+#   - passed to con2prim_safe with `default_projection`, to see its flags.
 #
 #   julia --project=study study/cold_failures.jl --tables=/path/to/tables [--n=20000] [--only=DD2]
 
@@ -57,9 +57,10 @@ end
 ok(o) = o.result === E.C2PResult.converged_newton || o.result === E.C2PResult.converged_fallback
 
 function flagname(f)
-    names = ((E.FLAG_POL_ATMOSPHERE, "ATMOSPHERE"), (E.FLAG_POL_CEILING, "CEILING"), (E.FLAG_POL_S_FLOORED, "S_FLOORED"),
-             (E.FLAG_POL_S_CEILED, "S_CEILED"), (E.FLAG_POL_W_CAPPED, "W_CAPPED"), (E.FLAG_POL_ρ_CEILED, "ρ_CEILED"),
-             (E.FLAG_POL_YE_CLAMPED, "YE_CLAMPED"), (E.FLAG_POL_ρ_FLOORED, "ρ_FLOORED"))
+    names = ((E.FLAG_POL_ATMOSPHERE, "ATMOSPHERE"), (E.FLAG_POL_NONFINITE, "NONFINITE"),
+             (E.FLAG_POL_NOT_CONVERGED, "NOT_CONVERGED"), (E.FLAG_POL_ρ_FLOORED, "ρ_FLOORED"),
+             (E.FLAG_POL_ρ_CEILED, "ρ_CEILED"), (E.FLAG_POL_YE_FLOORED, "YE_FLOORED"), (E.FLAG_POL_YE_CEILED, "YE_CEILED"),
+             (E.FLAG_POL_S_FLOORED, "S_FLOORED"), (E.FLAG_POL_S_CEILED, "S_CEILED"), (E.FLAG_POL_W_CEILED, "W_CEILED"))
     s = join([n for (b, n) in names if f & b != 0], "|")
     return isempty(s) ? "0" : s
 end
@@ -70,7 +71,7 @@ function main()
     opts = E.Con2PrimOptions{Float64}()
     for (name, v) in tabs
         rng = StableRNG(4242)
-        pol = E.default_policy(v, exp10(v.x_lo))
+        proj = E.default_projection(v, exp10(v.x_lo))
         nwarm = ncold = nrescued = 0
         safe = Dict{String,Int}()
         lines = String[]
@@ -91,7 +92,7 @@ function main()
             back(b) = b.ok && abs(b.r.ρ - st.ρ) <= 1e-6 * st.ρ
             (back(b_ref) || back(b_true)) && (nrescued += 1)
             rt = inner(v, cin, ye, st.s, opts)
-            sf = E.con2prim_safe(v, cin, opts, pol)
+            sf = E.con2prim_safe(v, cin, opts, proj)
             fl = flagname(sf.policy_flags)
             safe[fl] = get(safe, fl, 0) + 1
             push!(lines, @sprintf("  %-17s ρ=%.2e s=%.3g Yₑ=%.2f W=%.1f | inner at true s: Δw=%.1e | bisect ref/true: %s/%s | safe: %s, ρ off by %.1e",

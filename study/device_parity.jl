@@ -67,9 +67,9 @@ end
     @inbounds out[i] = (r.f1 / r.coshw, r.f2, r.pt.u_solved, r.pt.U, r.pt.p, typeof(r.f2)(r.pt.iters))
 end
 
-@kernel function safe_k!(out, @Const(cin), v, opts, pol)
+@kernel function safe_k!(out, @Const(cin), v, opts, proj)
     i = @index(Global)
-    @inbounds out[i] = con2prim_safe(v, cin[i], opts, pol)
+    @inbounds out[i] = con2prim_safe(v, cin[i], opts, proj)
 end
 
 """Mirror of the C++ device harness's sampling, drawn in Float64 and rounded to `T`."""
@@ -147,7 +147,7 @@ function run_table(name, v64)
     st = sample_states(v64, vT, n)
     @printf("sampled in %.1f s\n", time() - t0)
     opts = Con2PrimOptions{T}()
-    pol = default_policy(vT, exp10(T(vT.x_lo)))
+    proj = default_projection(vT, exp10(T(vT.x_lo)))
     nanT = T(NaN)
 
     # --- host passes
@@ -155,7 +155,7 @@ function run_table(name, v64)
     cold_cpu, t_cold_cpu = host_pass(i -> con2prim(vT, st.cin[i], opts), Con2PrimOut{T}, n)
     warm_cpu, t_warm_cpu = host_pass(i -> con2prim(vT, st.cin[i], opts, st.s[i], st.w[i], st.u[i]),
                                      Con2PrimOut{T}, n)
-    safe_cpu, t_safe_cpu = host_pass(i -> con2prim_safe(vT, st.cin[i], opts, pol), Con2PrimSafeOut{T}, n)
+    safe_cpu, t_safe_cpu = host_pass(i -> con2prim_safe(vT, st.cin[i], opts, proj), Con2PrimSafeOut{T}, n)
 
     # --- device passes
     dv = Adapt.adapt(DEVARRAY, vT)
@@ -168,7 +168,7 @@ function run_table(name, v64)
     t_eval_gpu = device_pass(() -> eval_k!(BACKEND, 256)(dpt, dρ, ds, dye, dv; ndrange=n))
     t_cold_gpu = device_pass(() -> cold_k!(BACKEND, 256)(dcold, dcin, dv, opts; ndrange=n))
     t_warm_gpu = device_pass(() -> warm_k!(BACKEND, 256)(dwarm, dcin, ds, dw, du, dv, opts; ndrange=n))
-    t_safe_gpu = device_pass(() -> safe_k!(BACKEND, 256)(dsafe, dcin, dv, opts, pol; ndrange=n))
+    t_safe_gpu = device_pass(() -> safe_k!(BACKEND, 256)(dsafe, dcin, dv, opts, proj; ndrange=n))
     pt_gpu, cold_gpu, warm_gpu, safe_gpu = Array(dpt), Array(dcold), Array(dwarm), Array(dsafe)
 
     failures = 0
