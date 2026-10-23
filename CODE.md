@@ -127,8 +127,13 @@ types keep `AbstractFloat`, since that is an array element type.
 **The EOS interface.** `prim2con`, `con2prim` and the state policy take any
 `AbstractEOS`. They reach it only through `evaluate`, `srange`,
 `srange_extended`, `logρ_bounds` and `yₑ_bounds`, and every method is typed on
-the abstract type. The contract is stated once, in `core/eos_interface.jl`.
-Introducing it changed no arithmetic ([HISTORY](HISTORY.md#the-eos-interface)).
+the abstract type. Two more methods are optional, because their defaults are
+built from those: `evaluate_windowed`, which the table overrides to return the
+extended window its temperature solve has already sampled, and
+`entropy_from_energy`, which it overrides to invert its energy field directly
+([Deliberate deviations](#deliberate-deviations-from-the-c)). The contract is
+stated once, in `core/eos_interface.jl`. Introducing it changed no arithmetic
+([HISTORY](HISTORY.md#the-eos-interface)).
 `EntropyEOS.κ` is part of the interface but is not exported, since `κ` is too common a name to take from a caller.
 
 **The analytic EOSs** have no C++ counterpart; what they are is in
@@ -390,15 +395,16 @@ Where the inner root is not unique, level 1 cannot keep its contract: a cold
 start can fail, and the edge solves of the diagnosis can land on another root,
 so that a valid state is projected onto a face. Measured on 2026-10-23 by
 `study/cold_failures.jl`: of 20,000 valid states per table (the sampling of
-`test/test_real_tables.jl`), a cold start failed on 8 (LS220), 16 (SRO LS220),
-10 (DD2, either version) and 3 (SFHo), all in region (a) or (b); a warm start
-failed on 2, both DD2. Of these 37 cold failures (counting DD2 once),
-`con2prim_safe` projects 33 onto a face — all 24 of LS220's and SRO LS220's onto
-ρ_max, which is the top of the table they lie at — and returns 4 as
-`NOT_CONVERGED`. (Before the con2prim fixes of
-[Deliberate deviations](#deliberate-deviations-from-the-c) there were 41; of
-those, 1.x's diagnosis found 29 outside the entropy window and sent 12 to the
-atmosphere.) A bisection in s, bracketed by either window, recovered none,
+`test/test_real_tables.jl`), a cold start failed on 4 (LS220), 9 (SRO LS220),
+10 (DD2, either version) and 7 (SFHo), all in region (a) or (b); a warm start
+failed on 2, both DD2. Of these 30 cold failures (counting DD2 once),
+`con2prim_safe` projects 22 onto a face — all 13 of LS220's and SRO LS220's onto
+ρ_max, which is the top of the table they lie at — and returns 8 as
+`NOT_CONVERGED`. (With the C++'s cold seed there were 37
+([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)); before the con2prim
+fixes of [Deliberate deviations](#deliberate-deviations-from-the-c) there were
+41, of which 1.x's diagnosis found 29 outside the entropy window and sent 12 to
+the atmosphere.) A bisection in s, bracketed by either window, recovered none,
 because G jumps between roots. Regions (a) and (b) are wrong physics, to be
 fixed by repairing the tables, so this is accepted as a limitation
 ([Open items](#open-items)).
@@ -441,12 +447,12 @@ face, relative as for the slack:
 
 | table | excess p99 | max | > 4·tol (old slack) | > 10⁻⁷ | re-flagged cold |
 | --- | --- | --- | --- | --- | --- |
-| synthetic | 6·10⁻⁹ | 6·10⁻⁷ | 930 of 4,638 | 1 | 1 |
-| LS220 | 5·10⁻⁹ | 2·10⁻⁵ | 360 of 3,899 | 29 | 146 |
-| SRO LS220 | 2·10⁻⁷ | 10⁻³ | 396 of 3,896 | 42 | 163 |
-| DD2 | 4·10⁻³ | 0.8 | 513 of 4,066 | 128 | 137 |
-| DD2 repaired | 4·10⁻³ | 0.8 | 570 of 4,067 | 127 | 135 |
-| SFHo | 4·10⁻⁹ | 0.7 | 477 of 3,995 | 31 | 68 |
+| synthetic | 5·10⁻⁹ | 6·10⁻⁷ | 770 of 4,638 | 1 | 1 |
+| LS220 | 2·10⁻⁹ | 2·10⁻⁵ | 271 of 3,899 | 23 | 140 |
+| SRO LS220 | 3·10⁻⁸ | 4·10⁻³ | 313 of 3,899 | 30 | 148 |
+| DD2 | 4·10⁻³ | 0.8 | 479 of 4,069 | 127 | 134 |
+| DD2 repaired | 4·10⁻³ | 0.8 | 492 of 4,068 | 127 | 135 |
+| SFHo | 4·10⁻⁹ | 0.7 | 402 of 3,998 | 30 | 63 |
 
 With a guess at the output none is re-flagged. Most of the excess is the
 solver's conditioning, which the slack of 10⁻⁷ covers; the tail is not. Where
@@ -564,6 +570,20 @@ solves of states on an edge of the entropy window converge, where the C++ fails
 - **An endpoint within tolerance is a bracket.** After the fallback re-solves
   the scan's interval, an endpoint whose residual meets the tolerance no longer
   fails the sign test.
+
+One numerical change is for speed. Each pass of the cold seed recovers the
+entropy from an internal energy. The C++ does that by a safeguarded Newton in
+s, each step a full `evaluate` and so a temperature solve of its own, which
+made the seed 80% of a cold solve. The table here solves its energy field for
+log T instead and samples the entropy there, one temperature solve per pass
+(`entropy_from_energy`); the analytic EOSs, whose `evaluate` is closed-form,
+keep the nested solve. The seed lands elsewhere than the C++'s, and with the
+C++'s three passes it sent more states to the fallback, so `seed_passes`
+defaults to 5. Cold solves then cost 2.1–4.3 times less on the host than
+before, take fewer Newton steps and fall back less often on every real table.
+On an H200 they gained 1.4–1.6 times on the real tables at Float64 and 4.1 on
+the synthetic one ([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)); see
+[Open items](#open-items) for why.
 
 Everything else follows the C++ decision for decision, including the parts that
 look wrong until you read why: the Newton step is clamped and taken
@@ -763,6 +783,17 @@ Where the two can be compared, they agree.
   could lift it (untested) **(open)**, at the cost of departing from the C++'s
   representation.
 - `check_table` is serial; see "Threading".
+- **(open)** On a GPU, cold `con2prim` on a real table is limited by warp
+  divergence, not by the work per state. About 2% of cold states take the
+  fallback or fail, at many times a Newton solve's cost; about half the warps
+  of 32 contain one, and the whole warp waits. On an H200 the direct cold seed
+  made the synthetic table, where no state falls back, 4.1 times faster, but
+  the real tables only 1.4–1.6 times at Float64 ([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)).
+  Running the fallback as a second kernel over only the states that need it
+  would remove the wait; a model from per-state costs on the host, before the
+  direct seed, put the divergence penalty at 4.4 times, and at 2.4 times with
+  the split. It needs the Newton phase and the fallback exposed as separate
+  entry points, since the caller, not this package, launches kernels.
 - **(open)** On CUDA.jl 6.4.2, a kernel that calls `con2prim_safe` and then
   `apply_policy` faults with an illegal address on states pushed off the valid
   range (2²⁰ such states, H200, either precision); on valid states it runs. Each

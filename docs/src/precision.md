@@ -16,7 +16,7 @@ cluster; the host is AMD EPYC 7543.
 For production on NVIDIA hardware use Float64. If table memory or bandwidth
 matters, the mixed configuration halves it at essentially no cost to con2prim.
 Pure Float32 runs, never produces a non-finite state through
-[`con2prim_safe`](@ref), and on an H200 is 1.3× (evaluate) to 3.6× (cold
+[`con2prim_safe`](@ref), and on an H200 is 1.5× (evaluate) to 3.9× (cold
 con2prim) faster — but its limits are real, and most of them come from storing
 the *hydro state* in Float32, not from this package.
 
@@ -193,15 +193,21 @@ the host's exact answer but a ~1e-4-noisy residual to the device); and on DD2,
 
 ## Throughput
 
-H200, 2²⁰ states, millions of states per second, LS220. The node is shared, so
-treat these as ±20%.
+H200, 2²⁰ states, millions of states per second, LS220, measured 2026-10-23.
+The node is shared, so treat these as ±20%; a repeat in the same job
+reproduced the Float64 row to 3%.
 
 | | evaluate | con2prim cold | con2prim warm |
 | --- | --- | --- | --- |
-| Float64 | 318 | 1.1 | 324 |
-| mixed | 370 | 0.9 | 335 |
-| Float32 | 411 | 4.0 | 841 |
+| Float64 | 311 | 1.5 | 315 |
+| mixed | 357 | 1.2 | 336 |
+| Float32 | 474 | 5.8 | 859 |
 | C++, Float64 (repaired LS220) | 381 | 0.6 | 529 |
+
+Cold `con2prim` is limited by warp divergence: a warp runs as long as its
+slowest state, and on LS220 2.2% of cold states need the fallback or fail, so
+about half the warps of 32 contain one and wait for it. On the synthetic table,
+where none do, Float64 cold runs at 67; the other real tables reach 1.4–2.5.
 
 The H200's FP64 throughput is unusually high; on consumer GPUs the Float32
 advantage is much larger.

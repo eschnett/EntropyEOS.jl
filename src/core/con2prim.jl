@@ -60,7 +60,7 @@ function Con2PrimOptions{T}(;
     w_max=12,
     τ_floor_rel=tau_floor_rel(T),
     bracket_scan=17,
-    seed_passes=3,
+    seed_passes=5,
     seed_s_iters=16,
 ) where {T<:AbstractFloat}
     return Con2PrimOptions{T}(
@@ -104,6 +104,8 @@ intermediate quantities the caller reuses.
 The two residuals are the momentum residual `f₁ = sinh(w) - cosh(w)·V`,
 deliberately not squared so the S → 0 root stays simple rather than double,
 and the normalized energy residual `f₂ = (τ_model - τ)/max(τ, τ_floor_rel·D)`.
+`sr_ext` is the extended entropy window at `ρ`, which the Newton clamps its step
+to.
 """
 struct Residuals{T<:Real}
     s::T
@@ -111,6 +113,7 @@ struct Residuals{T<:Real}
     ρ::T
     coshw::T
     pt::EOSPoint{T}
+    sr_ext::SRange{T}
     z::T
     v_par::T
     v_perp::T
@@ -187,7 +190,7 @@ function residuals(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::
     half_sinh = sinh(T(0.5) * w)
 
     ρ = D / coshw
-    pt = evaluate(eos, ρ, s, yₑ, u_prev)
+    pt, sr_ext = evaluate_windowed(eos, ρ, s, yₑ, u_prev)
 
     h, U, p, cs² = pt.h, pt.U, pt.p, pt.cs²
     U_ρ, U_s, U_ρs = pt.U_ρ, pt.U_s, pt.U_ρs
@@ -235,7 +238,7 @@ function residuals(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::
             p_w * sinhw * sinhw + T(2) * p * sinhw * coshw + B² * VdV_dw - B² * v_par * dvpar_dw
     dτ_ds = ρ * U_s * coshw * coshw + p_s * sinhw * sinhw + B² * VdV_ds - B² * v_par * dvpar_ds
 
-    return Residuals{T}(s, w, ρ, coshw, pt, z, v_par, v_perp, V, f1, f2, df1_ds, df1_dw,
+    return Residuals{T}(s, w, ρ, coshw, pt, sr_ext, z, v_par, v_perp, V, f1, f2, df1_ds, df1_dw,
                         dτ_ds / denom, dτ_dw / denom)
 end
 
@@ -466,46 +469,6 @@ function bracket_scan(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_per
 end
 
 """
-    seed_s_solve(eos, ρ, yₑ, ε, u_prev, n_iter)
-
-Recover the entropy from an internal energy, returning `(s, point)`.
-
-This cannot fail: `U_s = T̂ > 0` everywhere, which is precisely what the tails'
-monotonicity guards buy, so the extended entropy window always brackets the
-root and the safeguarded Newton is globally convergent.
-"""
-function seed_s_solve(eos::AbstractEOS{S}, ρ::T, yₑ::T, ε::T, u_prev::T, n_iter::Integer) where {S,T}
-    ext = srange_extended(eos, ρ, yₑ)
-    lo, hi = ext.s_min, ext.s_max
-    # A degenerate bracket is never seen on a real table, but is guarded.
-    lo < hi || return lo, evaluate(eos, ρ, lo, yₑ, u_prev)
-
-    ε_scale = ε > tiny_denom(T) ? ε : tiny_denom(T)
-    s = T(0.5) * (lo + hi)
-    pt = evaluate(eos, ρ, s, yₑ, u_prev)
-
-    for _ in 1:n_iter
-        g = pt.U - ε
-        # U increases with s, so the sign says which way the root lies.
-        g < zero(T) ? (lo = s) : (hi = s)
-        abs(g) <= tsolve_residual_tol(T) * ε_scale && break
-
-        s_next = zero(T)
-        newton_ok = false
-        if pt.U_s > zero(T)
-            s_next = s - g / pt.U_s
-            newton_ok = isfinite(s_next) && lo < s_next < hi
-        end
-        newton_ok || (s_next = T(0.5) * (lo + hi))
-        (s_next == s || !(lo < hi)) && break
-
-        s = s_next
-        pt = evaluate(eos, ρ, s, yₑ, pt.u_solved)
-    end
-    return s, pt
-end
-
-"""
     seed_z_solve(D, E, p, S_perp, B², n_iter)
 
 Solve the energy relation for the total enthalpy density, given a lagged
@@ -617,7 +580,7 @@ function cold_seed(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::
              T(0.5) * B² * v_par * v_par) / ρW²
         ε > zero(T) || (ε = zero(T))     # also catches a non-finite quotient
 
-        s, pt = seed_s_solve(eos, ρ, yₑ, ε, u_prev, nsit)
+        s, pt = entropy_from_energy(eos, ρ, yₑ, ε, u_prev, nsit)
         u_prev = pt.u_solved
         out = ColdSeed{T}(s, w, pt.u_solved, ρ, z)
 
@@ -702,8 +665,7 @@ function con2prim(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{
         ds = (b * r.f2 - d * r.f1) / det
         dw = (c * r.f1 - a * r.f2) / det
 
-        sr_ext = srange_extended(eos, r.ρ, yₑ)
-        ds_max = T(0.25) * (sr_ext.s_max - sr_ext.s_min)
+        ds_max = T(0.25) * (r.sr_ext.s_max - r.sr_ext.s_min)
         ds = clamp(ds, -ds_max, ds_max)
         dw = clamp(dw, -one(T), one(T))
 

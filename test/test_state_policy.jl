@@ -277,7 +277,9 @@
     @testset "NOT_CONVERGED" begin
         # A solver starved of iterations fails on a valid state; the diagnosis
         # then finds it inside the range, so there is nothing to project onto.
-        starved = Con2PrimOptions(; max_iter_newton=0, max_iter_1d=1)
+        # The seed is starved too: with all its passes, it alone solves these
+        # states to the tolerance.
+        starved = Con2PrimOptions(; max_iter_newton=0, max_iter_1d=1, seed_passes=1)
         rng = StableRNG(41)
         n = 0
         for _ in 1:50

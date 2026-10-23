@@ -168,7 +168,7 @@ holding the edges is always defined.
 @inline function nan_edge_ends(::Type{T}) where {T}
     n = T(NaN)
     pt = EOSPoint{T}(n, n, n, n, n, n, n, n, n, n, n, n, Int32(0), UInt32(0))
-    r = Residuals{T}(n, n, n, n, pt, n, n, n, n, n, n, n, n, n, n)
+    r = Residuals{T}(n, n, n, n, pt, SRange{T}(n, n), n, n, n, n, n, n, n, n, n, n)
     return EdgeEnds{T}(r, r, r, r)
 end
 
