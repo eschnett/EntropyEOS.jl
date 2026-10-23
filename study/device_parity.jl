@@ -72,6 +72,52 @@ end
     @inbounds out[i] = con2prim_safe(v, cin[i], opts, proj)
 end
 
+# The two-kernel form: the first stage over every state, the second over the
+# compacted indices of those not done.
+@kernel function cold_start_k!(out, st, @Const(cin), v, opts)
+    i = @index(Global)
+    @inbounds o, s = con2prim_start(v, cin[i], opts)
+    @inbounds out[i] = o
+    @inbounds st[i] = s
+end
+
+@kernel function cold_finish_k!(out, @Const(idx), @Const(st), @Const(cin), v, opts)
+    j = @index(Global)
+    @inbounds i = idx[j]
+    @inbounds out[i] = con2prim_finish(v, cin[i], opts, st[i])
+end
+
+@kernel function safe_start_k!(out, st, @Const(cin), v, opts, proj)
+    i = @index(Global)
+    @inbounds o, s = con2prim_safe_start(v, cin[i], opts, proj)
+    @inbounds out[i] = o
+    @inbounds st[i] = s
+end
+
+@kernel function safe_finish_k!(out, @Const(idx), @Const(st), @Const(cin), v, opts, proj)
+    j = @index(Global)
+    @inbounds i = idx[j]
+    @inbounds out[i] = con2prim_safe_finish(v, cin[i], opts, proj, st[i])
+end
+
+"""
+    split_pass(start!, finish!, dst)
+
+Time the two-kernel pipeline -- first stage, compaction on the device, second
+stage -- after a warm-up, and each part on its own. Returns the total, the
+parts and the number of states the second stage ran on.
+"""
+function split_pass(start!, finish!, dst)
+    run() = (start!(); idx = findall(map(!is_done, dst)); isempty(idx) || finish!(idx);
+             KernelAbstractions.synchronize(BACKEND); idx)
+    run()
+    t = @elapsed (idx = run())
+    t1 = @elapsed (start!(); KernelAbstractions.synchronize(BACKEND))
+    tc = @elapsed (idx = findall(map(!is_done, dst)); KernelAbstractions.synchronize(BACKEND))
+    t2 = @elapsed (isempty(idx) || finish!(idx); KernelAbstractions.synchronize(BACKEND))
+    return t, (t1, tc, t2), length(idx)
+end
+
 """Mirror of the C++ device harness's sampling, drawn in Float64 and rounded to `T`."""
 function sample_states(v64, vT, n)
     rng = StableRNG(12345)
@@ -171,6 +217,19 @@ function run_table(name, v64)
     t_safe_gpu = device_pass(() -> safe_k!(BACKEND, 256)(dsafe, dcin, dv, opts, proj; ndrange=n))
     pt_gpu, cold_gpu, warm_gpu, safe_gpu = Array(dpt), Array(dcold), Array(dwarm), Array(dsafe)
 
+    dcold2 = DEVARRAY{Con2PrimOut{T}}(undef, n)
+    dcst = DEVARRAY{Con2PrimStage{T}}(undef, n)
+    t_cold2, parts_cold2, npend_cold =
+        split_pass(() -> cold_start_k!(BACKEND, 256)(dcold2, dcst, dcin, dv, opts; ndrange=n),
+                   idx -> cold_finish_k!(BACKEND, 256)(dcold2, idx, dcst, dcin, dv, opts; ndrange=length(idx)), dcst)
+    dsafe2 = DEVARRAY{Con2PrimSafeOut{T}}(undef, n)
+    dsst = DEVARRAY{Con2PrimSafeStage{T}}(undef, n)
+    t_safe2, parts_safe2, npend_safe =
+        split_pass(() -> safe_start_k!(BACKEND, 256)(dsafe2, dsst, dcin, dv, opts, proj; ndrange=n),
+                   idx -> safe_finish_k!(BACKEND, 256)(dsafe2, idx, dsst, dcin, dv, opts, proj; ndrange=length(idx)),
+                   dsst)
+    cold_gpu2, safe_gpu2 = Array(dcold2), Array(dsafe2)
+
     failures = 0
 
     # Gate 1: failure *rate* parity. Boundary states flip in both directions
@@ -263,13 +322,34 @@ function run_table(name, v64)
     @printf("con2prim_safe: %d/%d non-finite outputs on GPU\n", bad, n)
     bad > 0 && (failures += 1)
 
+    # The two-kernel form: gate 1 against the fused kernel on the same device,
+    # so that a limit of the device itself is not counted twice; gate 3 again;
+    # and, not a gate, how often it agrees bit for bit with the fused kernel.
+    # The two are compiled separately, and the host, where they are identical,
+    # is what the test suite checks.
+    cg2 = count(o -> converged(o.result), cold_gpu2)
+    bad2 = count(o -> !(isfinite(o.base.ρ) && isfinite(o.base.s) && isfinite(o.base.w) && isfinite(o.cons.τ)),
+                 safe_gpu2)
+    @printf("two kernels: cold converged %d/%d, second stage on %d (cold) and %d (safe); con2prim_safe %d non-finite\n",
+            cg2, n, npend_cold, npend_safe, bad2)
+    @printf("two kernels: bitwise equal to the fused kernel: cold %.4f%%, safe %.4f%%\n",
+            agree(i -> cold_gpu2[i] === cold_gpu[i]), agree(i -> safe_gpu2[i] === safe_gpu[i]))
+    if n - cg2 > fail_bar(cg) || bad2 > 0
+        println("  GATE FAIL: two-kernel form")
+        failures += 1
+    end
+
     nt = Threads.nthreads()
     rate(t) = n / t / 1e6
     @printf("throughput (Mstates/s, %d states):\n", n)
     @printf("  %-14s %10s %10s %10s %8s\n", "", "cpu(1core)", "cpu(all)", "gpu", "gpu/core")
     for (lbl, tc, tg) in (("evaluate", t_eval_cpu, t_eval_gpu), ("con2prim cold", t_cold_cpu, t_cold_gpu),
-                          ("con2prim warm", t_warm_cpu, t_warm_gpu), ("con2prim_safe", t_safe_cpu, t_safe_gpu))
-        @printf("  %-14s %10.3f %10.2f %10.1f %8.0f\n", lbl, rate(tc) / nt, rate(tc), rate(tg), nt * tc / tg)
+                          ("con2prim warm", t_warm_cpu, t_warm_gpu), ("con2prim_safe", t_safe_cpu, t_safe_gpu),
+                          ("cold, 2 kernels", t_cold_cpu, t_cold2), ("safe, 2 kernels", t_safe_cpu, t_safe2))
+        @printf("  %-15s %10.3f %10.2f %10.1f %8.0f\n", lbl, rate(tc) / nt, rate(tc), rate(tg), nt * tc / tg)
+    end
+    for (lbl, (t1, tc, t2)) in (("cold", parts_cold2), ("safe", parts_safe2))
+        @printf("  %s, 2 kernels: first %.1f ms, compaction %.1f ms, second %.1f ms\n", lbl, 1e3t1, 1e3tc, 1e3t2)
     end
     println(failures == 0 ? "PASS" : "FAIL ($failures gates)")
     return failures

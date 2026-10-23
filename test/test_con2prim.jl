@@ -3,6 +3,16 @@ function _c2p_allocs(v, cin, opts, s, w, u)
     _c2p_probe(v, cin, opts, s, w, u)
     return @allocated _c2p_probe(v, cin, opts, s, w, u)
 end
+_c2p_start_probe(v, cin, opts) = EntropyEOS.con2prim_start(v, cin, opts)[2].s
+function _c2p_start_allocs(v, cin, opts)
+    _c2p_start_probe(v, cin, opts)
+    return @allocated _c2p_start_probe(v, cin, opts)
+end
+_c2p_finish_probe(v, cin, opts, st) = EntropyEOS.con2prim_finish(v, cin, opts, st).ρ
+function _c2p_finish_allocs(v, cin, opts, st)
+    _c2p_finish_probe(v, cin, opts, st)
+    return @allocated _c2p_finish_probe(v, cin, opts, st)
+end
 
 @testset "con2prim" begin
     E = EntropyEOS
@@ -124,6 +134,37 @@ end
         end
         @test nfail == 0
         @test maxρ < 1e-9
+    end
+
+    @testset "two stages" begin
+        # The second stage rebuilds the first stage's iterate from (s, w, u)
+        # rather than receiving it, so it must reproduce it bit for bit: for any
+        # stage, done or not, finishing gives con2prim's own result. Starved
+        # options send states through the fallback and to failures as well.
+        rng = StableRNG(31)
+        ndone = npending = 0
+        for o in (opts, Con2PrimOptions(; max_iter_newton=2), Con2PrimOptions(; max_iter_newton=0)),
+            _ in 1:150
+            ρ, s, yₑ, w, B², cos_vB = random_state(rng)
+            cin, pt = forward(ρ, s, yₑ, w, B², cos_vB)
+            for g in ((NaN, NaN, NaN), (s * (1 + 1e-3), w + 1e-3, pt.u_solved))
+                out, st = con2prim_start(v, cin, o, g...)
+                ref = con2prim(v, cin, o, g...)
+                @test con2prim_finish(v, cin, o, st) === ref
+                if is_done(st)
+                    ndone += 1
+                    @test out === ref
+                else
+                    npending += 1
+                    @test isnan(out.ρ)
+                    @test st.iters_newton == ref.iters_newton
+                end
+            end
+        end
+        @test ndone > 0
+        @test npending > 0
+        @test isbitstype(Con2PrimStage{Float64})
+        @test sizeof(Con2PrimStage{Float64}) <= 32
     end
 
     @testset "limiting cases" begin
@@ -297,5 +338,8 @@ end
         # And the fallback path, which uses the stack scratch for its scan.
         optsF = Con2PrimOptions(; max_iter_newton=0)
         @test_noallocs _c2p_allocs(v, cin, optsF, NaN, NaN, NaN)
+        # Each stage on its own.
+        @test_noallocs _c2p_start_allocs(v, cin, optsF)
+        @test_noallocs _c2p_finish_allocs(v, cin, optsF, con2prim_start(v, cin, optsF)[2])
     end
 end

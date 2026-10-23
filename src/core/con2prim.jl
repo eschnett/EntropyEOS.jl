@@ -134,6 +134,31 @@ struct BracketScanResult{T<:Real}
     s_best::T
 end
 
+"""
+    Con2PrimStage
+
+What [`con2prim_start`](@ref) hands to [`con2prim_finish`](@ref): an iterate as
+the `(s, w)` and the warm start `u` it was evaluated with, which reproduce it
+bit for bit, rather than the iterate itself, which is several times larger. It
+is the last Newton iterate if the Newton converged, and the best one otherwise.
+"""
+struct Con2PrimStage{T<:Real}
+    s::T
+    w::T
+    u::T
+    iters_newton::Int32
+    converged::Bool
+end
+
+"""
+    is_done(stage)
+
+Is the solve complete after its first stage, so that the output
+[`con2prim_start`](@ref) or [`con2prim_safe_start`](@ref) returned with it is
+the answer?
+"""
+@inline is_done(st::Con2PrimStage) = st.converged
+
 """A manufactured cold start: an exact seed derived without any prior iterate."""
 struct ColdSeed{T<:Real}
     s::T
@@ -596,6 +621,13 @@ end
                           iters_newton, iters_fallback, r.pt.flags)
 end
 
+"""The placeholder output of a first stage that is not done: no EOS call, all NaN."""
+@inline function nan_c2p_out(::Type{T}) where {T}
+    n = T(NaN)
+    pt = EOSPoint{T}(n, n, n, n, n, n, n, n, n, n, n, n, Int32(0), UInt32(0))
+    return Con2PrimOut{T}(n, n, n, n, n, n, n, pt, C2PResult.failed_max_iter, Int32(0), Int32(0), UInt32(0))
+end
+
 """
     con2prim(eos, in, opts; s_guess = NaN, w_guess = NaN, u_guess = NaN)
 
@@ -615,9 +647,39 @@ is what raises the warm-start Newton success rate from 86% to 99%, and the
 fallback is the safety net for the remainder.
 
 A failure still returns a fully populated best-effort state.
+
+This is [`con2prim_start`](@ref) followed, where needed, by
+[`con2prim_finish`](@ref), and gives the same result bit for bit. On a GPU the
+two stages can run as separate kernels.
 """
 function con2prim(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T}, s_guess::T=T(NaN),
                   w_guess::T=T(NaN), u_guess::T=T(NaN)) where {S,T}
+    out, st = con2prim_start(eos, in, opts, s_guess, w_guess, u_guess)
+    is_done(st) && return out
+    return con2prim_finish(eos, in, opts, st)
+end
+
+"""
+    con2prim_start(eos, in, opts, s_guess = NaN, w_guess = NaN, u_guess = NaN) -> (out, stage)
+
+The first stage of [`con2prim`](@ref): the cold seed, if a guess is missing,
+and the Newton. If [`is_done`](@ref)`(stage)`, `out` is `con2prim`'s result;
+otherwise `out` is a placeholder of NaNs, and [`con2prim_finish`](@ref) on
+`stage` gives the result.
+
+On a GPU a warp runs as long as its slowest state, and the fallback costs many
+times a Newton solve, so a few states in it hold up most warps. Running the
+first stage over all states and the second over only those not done, as two
+kernels, keeps them apart:
+
+```julia
+out[i], st[i] = con2prim_start(eos, cin[i], opts)               # kernel 1, every i
+idx = findall(!is_done, st)                                      # compaction, on the device
+out[idx[j]] = con2prim_finish(eos, cin[idx[j]], opts, st[idx[j]])  # kernel 2, every j
+```
+"""
+function con2prim_start(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T}, s_guess::T=T(NaN),
+                        w_guess::T=T(NaN), u_guess::T=T(NaN)) where {S,T}
     yₑ = in.D_Y / in.D
 
     # The cold seed is computed only when a guess is missing, so a fully warm
@@ -651,7 +713,12 @@ function con2prim(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{
     # `best_norm` may start as NaN from a non-finite first residual; the update
     # is written as `!(n >= best_norm)` so that is replaced by the first finite
     # iterate rather than latching forever.
+    #
+    # Each iterate is remembered with the warm start it was evaluated with, so
+    # that con2prim_finish can rebuild it exactly.
+    u_last = u_start
     r_best = r
+    u_best = u_start
     best_norm = scaled_norm(r)
 
     while !converged && iters < opts.max_iter_newton
@@ -672,22 +739,46 @@ function con2prim(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{
         w_raw = w + dw
         w_next = w_raw < zero(T) ? tiny_w(T) : clamp(w_raw, zero(T), opts.w_max)
         s_next = s + ds
-        r_next = residuals(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², s_next, w_next,
-                           r.pt.u_solved, opts.τ_floor_rel)
+        u_next = r.pt.u_solved
+        r_next = residuals(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², s_next, w_next, u_next,
+                           opts.τ_floor_rel)
 
         (isfinite(r_next.f1) && isfinite(r_next.f2)) || break
 
-        s, w, r = s_next, w_next, r_next
+        s, w, r, u_last = s_next, w_next, r_next, u_next
         converged = f1_converged(r, opts.tol) && abs(r.f2) <= opts.tol
 
         n_now = scaled_norm(r)
         if isfinite(n_now) && !(n_now >= best_norm)
             r_best = r
+            u_best = u_last
             best_norm = n_now
         end
     end
 
-    converged && return fill_out(r, yₑ, C2PResult.converged_newton, iters, Int32(0))
+    if converged
+        return fill_out(r, yₑ, C2PResult.converged_newton, iters, Int32(0)),
+               Con2PrimStage{T}(r.s, r.w, u_last, iters, true)
+    end
+    return nan_c2p_out(T), Con2PrimStage{T}(r_best.s, r_best.w, u_best, iters, false)
+end
+
+"""
+    con2prim_finish(eos, in, opts, stage) -> Con2PrimOut
+
+The second stage of [`con2prim`](@ref), for a `stage` from
+[`con2prim_start`](@ref): the nested one-dimensional fallback, started from the
+Newton's best iterate. For a stage that [`is_done`](@ref) it only rebuilds the
+converged result.
+"""
+function con2prim_finish(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T},
+                         st::Con2PrimStage{T}) where {S,T}
+    yₑ = in.D_Y / in.D
+    iters = st.iters_newton
+    # Evaluated as the first stage evaluated it, so this is its iterate, bit for bit.
+    r = residuals(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², st.s, st.w, st.u, opts.τ_floor_rel)
+    st.converged && return fill_out(r, yₑ, C2PResult.converged_newton, iters, Int32(0))
+    r_best = r
 
     # --- Nested one-dimensional fallback ---------------------------------
     s_anchor = r_best.s

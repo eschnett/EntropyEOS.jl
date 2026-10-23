@@ -137,6 +137,27 @@ Pure Float32 is usable but has real accuracy limits; the documentation's
 page has the measurements. The GPU testset is described in
 [CODE.md § Testing](CODE.md#testing).
 
+A few states that need `con2prim`'s fallback hold up the warps they are in.
+Running it as a second kernel over only those states made cold `con2prim` 1.5–2.7
+times faster on an H200
+([CODE.md § Discipline in `core/`](CODE.md#discipline-in-core)); the same
+works for `con2prim_safe` with `con2prim_safe_start` and `con2prim_safe_finish`:
+
+```julia
+@kernel function c2p_start!(out, st, @Const(cin), v, opts)
+    i = @index(Global)
+    out[i], st[i] = con2prim_start(v, cin[i], opts)
+end
+@kernel function c2p_finish!(out, @Const(idx), @Const(st), @Const(cin), v, opts)
+    i = idx[@index(Global)]
+    out[i] = con2prim_finish(v, cin[i], opts, st[i])
+end
+
+c2p_start!(backend, 256)(out, st, cin, dv, opts; ndrange=length(cin))
+idx = findall(map(!is_done, st))           # on the device
+isempty(idx) || c2p_finish!(backend, 256)(out, idx, st, cin, dv, opts; ndrange=length(idx))
+```
+
 ## Status
 
 The run-time path is complete and tested: table loading and checking, the

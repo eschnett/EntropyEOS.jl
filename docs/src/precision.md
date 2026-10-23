@@ -200,14 +200,19 @@ reproduced the Float64 row to 3%.
 | | evaluate | con2prim cold | con2prim warm |
 | --- | --- | --- | --- |
 | Float64 | 311 | 1.5 | 315 |
+| Float64, two kernels | | 4.0 | |
 | mixed | 357 | 1.2 | 336 |
 | Float32 | 474 | 5.8 | 859 |
+| Float32, two kernels | | 13.1 | |
 | C++, Float64 (repaired LS220) | 381 | 0.6 | 529 |
 
-Cold `con2prim` is limited by warp divergence: a warp runs as long as its
-slowest state, and on LS220 2.2% of cold states need the fallback or fail, so
-about half the warps of 32 contain one and wait for it. On the synthetic table,
-where none do, Float64 cold runs at 67; the other real tables reach 1.4–2.5.
+In one kernel, cold `con2prim` is limited by warp divergence: a warp runs as
+long as its slowest state, and on LS220 2.2% of cold states need the fallback
+or fail, so about half the warps of 32 contain one and wait for it. On the
+synthetic table, where none do, Float64 cold runs at 67. Running the fallback
+as a second kernel over only the states that need it (`con2prim_start` and
+`con2prim_finish`) gives the "two kernels" rows; on the other real tables
+Float64 cold then reaches 2.1–5.1.
 
 The H200's FP64 throughput is unusually high; on consumer GPUs the Float32
 advantage is much larger.

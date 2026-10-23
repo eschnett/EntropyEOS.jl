@@ -9,6 +9,7 @@ recorded each item in the documentation.
 - [State policy](#state-policy)
 - [Discipline in `core/`](#discipline-in-core)
   - [The one stack buffer](#the-one-stack-buffer)
+  - [Two stages](#two-stages)
 - [Deliberate deviations from the C++](#deliberate-deviations-from-the-c)
 - [Testing](#testing)
   - [Static analysis](#static-analysis)
@@ -245,6 +246,52 @@ level 2 keeping level 1's bits.
 
 2026-09-23. The `MVector{33,T}` buffer in `bracket_scan` was the design's
 biggest open risk; it is resolved by the kernel compiling and running on Metal.
+
+### Two stages
+
+2026-10-23. Split `con2prim` and `con2prim_safe` each into a first and a
+second stage, so that a GPU caller can run the fallback as a second kernel over
+only the states that need it. Before the direct cold seed, a host model from
+per-state spline counts on LS220 put the cost of warp divergence at 4.4 times
+the work, and at 2.4 times with the fallback split off; after it the seed was
+no longer what warps waited for, so the device gained 1.4–1.6 times where the
+host gained 2.6.
+
+The fused functions are now the two stages in sequence. Their outputs were
+bitwise unchanged on the 18 cases of 32,768 states used for the seed. The
+second stage rebuilds the first's iterate from `(s, w, u)`; the test suite
+asserts that finishing any first stage, done or not, gives the fused result
+bit for bit, on the synthetic table with starved options and on the real
+tables' cold states. Storing the iterate itself was rejected: `Residuals` is
+~280 bytes per state against 32, and rebuilding it costs one evaluation on a
+pending state, against a fallback's hundreds.
+
+Measured on an H200 by `study/device_parity.jl`, 2²⁰ states per table, the
+fused and the two-kernel form in the same run (a repeat of LS220 and SRO LS220
+reproduced every rate to 5%). Millions of states per second, and the number of
+states the second stage ran on:
+
+| Float64 | cold, fused | cold, 2 kernels | second stage | `con2prim_safe`, fused | 2 kernels | second stage |
+| --- | --- | --- | --- | --- | --- | --- |
+| synthetic | 64.2 | 67.6 | 0 | 14.7 | 41.9 | 122,170 |
+| LS220 | 1.5 | 3.8–4.0 | 23,115 | 1.3 | 2.5 | 142,169 |
+| SRO LS220 | 2.3 | 5.1 | 24,751 | 1.8 | 3.7 | 143,644 |
+| DD2 | 1.8 | 4.8 | 34,648 | 1.5 | 3.1 | 150,458 |
+| SFHo | 1.4 | 2.1 | 5,886 | 1.3 | 1.9 | 127,637 |
+
+At Float32 cold went from 5.5 to 13.1 on LS220, 9.1 to 16.8 on SRO LS220, 8.3
+to 15.7 on DD2 and 14.5 to 21.1 on SFHo. The compaction (`findall` on the
+device) took 0.1–0.3 ms, against 80–160 ms for the first stage. On the device
+the two-kernel results were bitwise those of the fused kernel for every state
+of every table at both precisions, and every gate the fused kernel passed, it
+passed too. Against the commit before the direct cold seed, run in the same
+job, cold Float64 `con2prim` on LS220 went from 1.1 to 4.0.
+
+What remains is the second stage itself. On SFHo its 5,886 states, 0.6%, of
+which 1,853 end in failure, took 410 ms against the first stage's 82. In
+`con2prim_safe` the second stage also carries every state outside a face,
+12–14% of this sampling: w is uniform in [0, 6), and 11.7% of it lies above
+the default cap acosh(100) ≈ 5.30.
 
 ## Deliberate deviations from the C++
 

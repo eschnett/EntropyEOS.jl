@@ -506,7 +506,7 @@ The C++ uses the same numbering.
 No heap allocation, no `throw`, no `@fastmath`, no closures, no `String`; array
 reads `@inbounds`, small helpers `@inline`. Kernel-side structs stay `isbits`;
 a NaN sentinel is not replaced with `Union{Nothing,T}`, because NaN is
-load-bearing and flows through arithmetic. Four consequences worth naming:
+load-bearing and flows through arithmetic. Five consequences worth naming:
 
 - **Domain-safe math.** `log10`, `sqrt` and `floor(Int, ·)` throw in Julia where
   C returns NaN or is merely unspecified. `core/defs.jl` provides `safe_log10`,
@@ -533,6 +533,23 @@ load-bearing and flows through arithmetic. Four consequences worth naming:
   promoted out of the heap. The cap is a `Val` parameter so a GPU caller can
   shrink per-thread local memory without touching the algorithm
   ([HISTORY](HISTORY.md#the-one-stack-buffer)).
+- **Two stages.** A warp runs as long as its slowest state. On a real table
+  about 2% of cold states need `con2prim`'s fallback or fail, at many times a
+  Newton solve's cost, and about half the warps contain one. So `con2prim` and
+  `con2prim_safe` are each a first stage (`*_start`: the cold seed and the
+  Newton, and for `_safe` the check that the state lies inside every face) and
+  a second (`*_finish`: the fallback, and for `_safe` the diagnosis and the
+  face solves). A caller runs the first over every state, compacts the indices
+  of those not `is_done`, and runs the second over only those. The fused
+  functions are the two stages in sequence and give the same result bit for
+  bit. The hand-off is not the iterate (`Residuals` is ~280 bytes) but the
+  `(s, w)` and warm start that reproduce it: `residuals` is pure, so the second
+  stage rebuilds it exactly, for one extra evaluation on a pending state. On an
+  H200 this made cold `con2prim` 1.5–2.7 times faster on the real tables, and
+  the device's two-kernel results are bitwise those of its fused kernel
+  ([HISTORY](HISTORY.md#two-stages)). The package launches no kernels:
+  `study/device_parity.jl` and the GPU testset show the launch and the
+  compaction.
 
 ## Deliberate deviations from the C++
 
@@ -582,8 +599,10 @@ C++'s three passes it sent more states to the fallback, so `seed_passes`
 defaults to 5. Cold solves then cost 2.1–4.3 times less on the host than
 before, take fewer Newton steps and fall back less often on every real table.
 On an H200 they gained 1.4–1.6 times on the real tables at Float64 and 4.1 on
-the synthetic one ([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)); see
-[Open items](#open-items) for why.
+the synthetic one, where no state falls back
+([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)); the fallback is why,
+and running it as a second kernel is the remedy
+([Discipline in `core/`](#discipline-in-core)).
 
 Everything else follows the C++ decision for decision, including the parts that
 look wrong until you read why: the Newton step is clamped and taken
@@ -783,17 +802,6 @@ Where the two can be compared, they agree.
   could lift it (untested) **(open)**, at the cost of departing from the C++'s
   representation.
 - `check_table` is serial; see "Threading".
-- **(open)** On a GPU, cold `con2prim` on a real table is limited by warp
-  divergence, not by the work per state. About 2% of cold states take the
-  fallback or fail, at many times a Newton solve's cost; about half the warps
-  of 32 contain one, and the whole warp waits. On an H200 the direct cold seed
-  made the synthetic table, where no state falls back, 4.1 times faster, but
-  the real tables only 1.4–1.6 times at Float64 ([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)).
-  Running the fallback as a second kernel over only the states that need it
-  would remove the wait; a model from per-state costs on the host, before the
-  direct seed, put the divergence penalty at 4.4 times, and at 2.4 times with
-  the split. It needs the Newton phase and the fallback exposed as separate
-  entry points, since the caller, not this package, launches kernels.
 - **(open)** On CUDA.jl 6.4.2, a kernel that calls `con2prim_safe` and then
   `apply_policy` faults with an illegal address on states pushed off the valid
   range (2²⁰ such states, H200, either precision); on valid states it runs. Each
