@@ -5,7 +5,7 @@ using EntropyEOS
 
 makedocs(;
     sitename="EntropyEOS",
-    format=Documenter.HTML(),
+    format=Documenter.HTML(; canonical="https://eschnett.github.io/EntropyEOS.jl/stable/", edit_link="main"),
     modules=[EntropyEOS],
     pages=[
         "Home" => "index.md",

@@ -7,7 +7,7 @@ EntropyEOS
 ## Contents
 
 ```@contents
-Pages = ["tables.md", "adapter.md", "solver.md", "analytic.md", "internals.md"]
+Pages = ["tables.md", "adapter.md", "solver.md", "analytic.md", "precision.md", "internals.md"]
 Depth = 2
 ```
 
