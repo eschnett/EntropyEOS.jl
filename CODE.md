@@ -789,8 +789,10 @@ Where the two can be compared, they agree.
   build. Julia's δ_T then overflows to Inf, and the node is skipped as if its
   input were non-finite, which the C++ does too. Clang contracts the sum into
   FMAs by default, though, which leaves a residual of about 6 and reports
-  δ_T ≈ 3e17 there. The plateau itself is reported by `logenergy_nonmonotone_T`
-  either way. The test exempts exactly these nodes and requires all others to
+  δ_T ≈ 3e17 there. Which side skips which plateau nodes depends on the
+  platform's build: on Linux x86-64 the C++ skips some that Julia evaluates. The
+  plateau itself is reported by `logenergy_nonmonotone_T` either way. The test
+  exempts exactly these nodes, in both directions, and requires all others to
   agree.
 - The fitted B-spline coefficients are **bitwise identical** when the C++ is
   built with `-ffp-contract=off`. At clang's default some differ in the last

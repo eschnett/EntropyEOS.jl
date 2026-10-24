@@ -5,16 +5,20 @@
 #
 # One difference is expected and tolerated: on a logenergy plateau (planted in
 # the dirty table) the three ε values of a T stencil are equal, and whether
-# `fd3` returns exactly 0 or a rounding residual there depends on whether the
-# compiler contracts the stencil sum into FMAs. Julia never does; clang does by
-# default. With a zero derivative `delta_T` overflows to Inf and the node is
-# skipped; with a residual it is reported as ~1e17. Such nodes are excluded
-# below, and every other node must agree.
+# `fd3` returns exactly 0 or a rounding residual there depends on how the build
+# evaluates the stencil sum (clang contracts it into FMAs by default; Julia
+# never does). With a zero derivative `delta_T` overflows to Inf and the node is
+# skipped; with a residual it is reported as ~1e17. Either side may skip such a
+# node, depending on the platform's build, so they are excluded below, and
+# every other node must agree.
 
 const CPP_AVAILABLE = EntropyEOS_jll.is_available()
 
-"""Run `eos_test` with `args`, returning its stdout; the exit code is a verdict, not an error."""
-_eos_test(args) = read(ignorestatus(`$(EntropyEOS_jll.eos_test()) $args`), String)
+"""
+Run `eos_test` with `args`, returning its stdout with Unix line endings (the
+Windows build writes CRLF). The exit code is a verdict, not an error.
+"""
+_eos_test(args) = replace(read(ignorestatus(`$(EntropyEOS_jll.eos_test()) $args`), String), "\r\n" => "\n")
 
 """The `name: count=… max=… rms=…` summary lines of a C++ report, in order."""
 function _cpp_summary(out)
@@ -30,7 +34,7 @@ function _cpp_csv(path)
     out = Dict{NTuple{3,Int},Float64}()
     isfile(path) || return out
     for line in Iterators.drop(eachline(path), 1)
-        p = split(line, ',')
+        p = split(rstrip(line), ',')   # CRLF on Windows
         out[(parse(Int, p[1]) + 1, parse(Int, p[2]) + 1, parse(Int, p[3]) + 1)] = parse(Float64, p[7])
     end
     return out
@@ -155,10 +159,9 @@ else
                 cc = _cpp_csv("$(prefix)_$(c.name).csv")
                 jj = Dict((l.iρ, l.jT, l.kYₑ) => Float64(l.value) for l in c.worst)
                 if fma_sensitive(c.name)
-                    # Only plateau nodes may be missing or disagree.
-                    @test keys(jj) ⊆ keys(cc)
-                    @test setdiff(keys(cc), keys(jj)) ⊆ flat
-                    @test all(isapprox(cc[k], jj[k]; rtol=1e-9) for k in keys(jj) if k ∉ flat)
+                    # Only plateau nodes may be missing, on either side, or disagree.
+                    @test symdiff(keys(cc), keys(jj)) ⊆ flat
+                    @test all(haskey(cc, k) && isapprox(cc[k], jj[k]; rtol=1e-9) for k in keys(jj) if k ∉ flat)
                 else
                     @test keys(cc) == keys(jj)
                     @test all(isequal(cc[k], jj[k]) || isapprox(cc[k], jj[k]; rtol=1e-9) for k in keys(jj))
