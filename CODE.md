@@ -37,6 +37,14 @@ performed once before a simulation campaign, and the run-time path contains no
 repair logic. Use the C++ `eos_repair` tool for that, and `check_table` here to
 detect a table that has not been repaired.
 
+The C++ tools (`eos_repair`, `eos_test`, `eos_crop`) are not translated
+either; `bin/` runs the builds that EntropyEOS_jll ships. `bin/` is its own
+Julia environment, so the package does not depend on the JLL, nor on the MPI
+build of HDF5 that the JLL pulls in. `bin/run.jl` passes the tool's exit code
+through, because those codes are verdicts (`eos_repair` exits 1 when it
+changed the table). The three shell scripts beside it only spare typing
+`julia --project=bin bin/run.jl TOOL`.
+
 ## Environment
 
 - Julia 1.10 or newer. Developed on 1.13; CI covers 1.10 and 1.11 on Linux,
@@ -83,6 +91,7 @@ src/host/            owns memory, may throw, never needed on a device
   analytic_eos.jl    the analytic EOSs' validating constructors and GPP constants
   io_stellarcollapse.jl   the stellarcollapse HDF5 reader (read side only)
 src/precompile.jl    PrecompileTools workload over the whole public Float64 path
+bin/                 the C++ tools from EntropyEOS_jll, in their own environment
 ```
 
 Include order in `EntropyEOS.jl` is dependency order, and `test/runtests.jl`

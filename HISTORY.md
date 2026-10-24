@@ -4,6 +4,7 @@ How the package got where it is. The current design is in [CODE.md](CODE.md);
 the sections here follow its headings. Dates are those of the commits that
 recorded each item in the documentation.
 
+- [Scope](#scope)
 - [Type design](#type-design)
   - [The EOS interface](#the-eos-interface)
 - [State policy](#state-policy)
@@ -14,6 +15,14 @@ recorded each item in the documentation.
 - [Testing](#testing)
   - [Static analysis](#static-analysis)
 - [Precision and devices](#precision-and-devices)
+
+## Scope
+
+2026-10-24. Added `bin/`, which runs the C++ tools that EntropyEOS_jll ships,
+so that repairing a table no longer needs a C++ build. The tools are wrapped,
+not translated; repair stays out of the package. A package extension was the
+alternative, but it would have offered a Julia function around what is a
+command-line step done once per table, and `bin/` needs no API.
 
 ## Type design
 

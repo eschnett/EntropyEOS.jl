@@ -115,6 +115,23 @@ Both are `isbits` and go into a GPU kernel as they are. They have κ = 1, so
 covers choosing the entropy window, and gives an SLy example built from the
 paper's fits.
 
+### Repairing a table
+
+Published tables are often not monotone in T, which the adapter needs.
+Repairing one is an offline step, done once per table by the C++ `eos_repair`
+tool. EntropyEOS_jll ships the C++ tools, and the scripts in `bin/` run them
+from a checkout of this repository, with no C++ build:
+
+```sh
+bin/eos_repair LS220.h5 LS220_repaired.h5 --log repair.log   # exit code 1: it changed something
+bin/eos_test LS220_repaired.h5                                # the C++ table check
+bin/eos_crop LS220.h5 small.h5 --irho 0 59 --jt 0 135 --kye 0 15
+```
+
+The first call sets up the `bin` environment, which takes a few seconds. Each
+tool's `--help` describes its options. On Windows, call
+`julia --project=bin bin/run.jl eos_repair …` instead.
+
 ## GPUs
 
 The kernels are allocation-free, exception-free and generic in the scalar type,
@@ -175,8 +192,8 @@ re-tabulation, DD2 (original and repaired) and SFHo — covering grids from
 those tests). Adapter build times and their threading are in
 [CODE.md § Threading](CODE.md#threading).
 
-Table *repair* is deliberately not included; see [CODE.md § Scope](CODE.md#scope).
-Use the C++ `eos_repair` tool for that.
+Table *repair* is deliberately not translated; see [CODE.md § Scope](CODE.md#scope).
+The C++ tool runs from `bin/`; see [Repairing a table](#repairing-a-table).
 
 ## Relationship to the C++ library
 
