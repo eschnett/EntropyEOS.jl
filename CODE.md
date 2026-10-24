@@ -670,10 +670,14 @@ no reference implementation, in this order:
    or on the hybrid's cold end, the entropy is physically ill-determined, and a
    flat 1e-12 bound would be either false or vacuous.
 4. **Statistical agreement on real tables**, gated behind `ENTROPYEOS_TABLE_DIR`.
+5. **The C++ itself**, run through EntropyEOS_jll on synthetic tables
+   ([§ Validation against the C++](#validation-against-the-c)).
 
 Gating is by environment variable so CI needs nothing: `ENTROPYEOS_TABLE_DIR`
 for the five real tables, `ENTROPYEOS_TEST_GPU` for a GPU backend. Both skip
-with an `@info` rather than failing.
+with an `@info` rather than failing. The C++ cross-check needs no gate, since
+EntropyEOS_jll is a test dependency; it skips likewise on a platform the JLL
+has no build for.
 
 Iteration counts and `C2PResult` are never compared across platforms, only
 values: a state near a decision boundary legitimately takes a different path.
@@ -757,6 +761,28 @@ What is easy to get wrong here:
 
 Where the two can be compared, they agree.
 
+- **In the test suite**, `test/test_cpp_crosscheck.jl` runs the C++ `eos_test`
+  from EntropyEOS_jll (1.1.0). The C++ writes its three synthetic tables (clean,
+  seeded, dirty), and both implementations then read the same file. On this
+  Mac (aarch64), measured:
+  - the generators agree to 8e-16;
+  - every `check_table` class count matches, and every node's metric agrees to
+    4e-11 (the test allows 1e-9);
+  - κ and `m_B*` agree to 2e-15;
+  - the con2prim audit's quantiles agree to within 15% above rounding level.
+    For that comparison the test ports the audit's per-state generator, so
+    Julia solves exactly the C++'s 20,000 states.
+
+  The one expected difference is `delta_T` at the 330 nodes of the dirty table
+  whose T stencil spans its planted logenergy plateau; on this Mac, 290 of them
+  differ. There the three ε values
+  are equal, so the stencil sum is exactly 0 in Julia and in an uncontracted C++
+  build. Julia's δ_T then overflows to Inf, and the node is skipped as if its
+  input were non-finite, which the C++ does too. Clang contracts the sum into
+  FMAs by default, though, which leaves a residual of about 6 and reports
+  δ_T ≈ 3e17 there. The plateau itself is reported by `logenergy_nonmonotone_T`
+  either way. The test exempts exactly these nodes and requires all others to
+  agree.
 - The fitted B-spline coefficients are **bitwise identical** when the C++ is
   built with `-ffp-contract=off`. At clang's default some differ in the last
   bits, because clang fuses the elimination update into an FMA and Julia does

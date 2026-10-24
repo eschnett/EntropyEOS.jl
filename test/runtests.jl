@@ -5,6 +5,7 @@ using Test
 # streams are not guaranteed stable across minor versions, and a test that
 # silently samples different points after an upgrade is not a test.
 using ForwardDiff
+using EntropyEOS_jll
 using HDF5
 using LinearAlgebra
 using StaticArrays
@@ -35,5 +36,6 @@ include("testutil.jl")
     include("test_device_api.jl")
     include("test_gpu.jl")
     include("test_real_tables.jl")
+    include("test_cpp_crosscheck.jl")
     include("test_quality.jl")
 end

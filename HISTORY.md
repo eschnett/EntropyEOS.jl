@@ -468,6 +468,15 @@ The throughput table it superseded, H200, LS220, millions of states per second:
 
 ## Testing
 
+2026-10-24. Added the C++ cross-check through EntropyEOS_jll. Until then every
+comparison with the C++ had been run by hand against a local build. The
+JLL ships only executables and a static C++ library with no C interface, so
+reports, not function values, are compared. The first run found that the JLL's
+macOS build contracts `fd3`'s stencil into FMAs. That flips `delta_T` on
+plateau nodes between "skipped" and ~1e17 (see
+[CODE.md](CODE.md#validation-against-the-c)); it is a build setting, not a
+translation difference.
+
 ### Static analysis
 
 2026-09-23. `Aqua` is how the unused `PrecompileTools` entry was eventually
