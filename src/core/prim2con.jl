@@ -38,8 +38,17 @@ This direction is closed form and cannot fail.
 """
 function prim2con(eos::AbstractEOS{S}, ρ::T, s::T, yₑ::T, w::T, B²::T, cos_vB::T,
                   u_guess::T=T(NaN)) where {S,T}
-    pt = evaluate(eos, ρ, s, yₑ, u_guess)
+    return prim2con_at(evaluate(eos, ρ, s, yₑ, u_guess), ρ, yₑ, w, B², cos_vB)
+end
 
+"""
+    prim2con_at(pt, ρ, yₑ, w, B², cos_vB)
+
+`prim2con` at an EOS point already evaluated at `(ρ, s, yₑ)`. The projection's
+face solves need the point for the state's enthalpy before they can choose the
+velocity direction, and this spares them a second evaluation.
+"""
+@inline function prim2con_at(pt::EOSPoint{T}, ρ::T, yₑ::T, w::T, B²::T, cos_vB::T) where {T}
     W = cosh(w)
     v = tanh(w)
     sin_vB² = one(T) - cos_vB * cos_vB

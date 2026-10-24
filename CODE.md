@@ -12,8 +12,10 @@ the method. How the design got here is in [HISTORY.md](HISTORY.md).
 - [Layout](#layout)
 - [Data model and units](#data-model-and-units)
 - [Type design](#type-design)
-- [State policy flags](#state-policy-flags)
-  - [Two-level projection (proposed)](#two-level-projection-proposed)
+- [State policy](#state-policy)
+  - [Level 1: projection](#level-1-projection)
+  - [Level 2: physics](#level-2-physics)
+  - [Flags](#flags)
 - [Discipline in `core/`](#discipline-in-core)
 - [Deliberate deviations from the C++](#deliberate-deviations-from-the-c)
 - [Threading](#threading)
@@ -69,7 +71,8 @@ src/core/            kernel-side: allocation-free, exception-free, generic in T
   analytic_eos.jl    IdealGasEOS and HybridEOS: closed-form potentials
   prim2con.jl        primitives to conserved, closed form
   con2prim.jl        conserved to primitives: Newton, cold seed, bracket scan, fallback
-  state_policy.jl    the never-fails layer
+  faces.jl           the projection's face solves
+  state_policy.jl    the projection that never fails, and the physics policy above it
 src/host/            owns memory, may throw, never needed on a device
   units.jl           physical constants and the unit conventions
   table.jl           RawTable: axes, named 3-D fields, scalar attributes
@@ -159,167 +162,201 @@ running `evaluate` and `con2prim` as KA kernels on a Metal GPU. Narrowing the
 scalar type is a separate explicit step (`narrow`), because a device hop must
 never change precision silently.
 
-## State policy flags
+## State policy
 
-`con2prim_safe` and `project_prim_state` report each repair as a bit in
-`policy_flags` rather than leaving the caller to infer it from the returned
-state. Every clamp sets its own bit, including those that leave a state the
-following projection finds already in range. The bit values are the same as in
-the C++.
+The never-fails path has two levels. `con2prim_safe` projects a state onto the
+valid range, which is mechanics, and `apply_policy` decides what a state should
+become — the atmosphere, say — which is physics and depends on the evolution
+scheme:
 
-| bit | flag | the repair |
-| --- | --- | --- |
-| 8 | `FLAG_POL_ATMOSPHERE` | replaced the whole state by the atmosphere at rest |
-| 9 | `FLAG_POL_CEILING` | hit a collapse ceiling, then excised or projected onto the ceiling |
-| 10, 11 | `FLAG_POL_S_FLOORED`, `_S_CEILED` | moved s onto the physical entropy window |
-| 12 | `FLAG_POL_W_CAPPED` | clamped w into `[0, w_cap]`, preserving D |
-| 13 | `FLAG_POL_ρ_CEILED` | lowered ρ to ρ_ceiling: rest mass removed |
-| 14 | `FLAG_POL_YE_CLAMPED` | clamped Yₑ into the table |
-| 15 | `FLAG_POL_NONFINITE` | saw non-finite input or D ≤ 0 (with `ATMOSPHERE`) |
-| 16 | `FLAG_POL_ρ_FLOORED` | raised ρ to ρ_atm without an atmosphere reset: rest mass added |
+```julia
+out = con2prim_safe(eos, in, opts, proj)       # level 1: projection
+out = apply_policy(eos, in, out, proj, pol)    # level 2: physics, replaceable
+```
 
-`FLAG_POL_ρ_CLAMPED` is the two-bit mask `ρ_FLOORED | ρ_CEILED`, and
-`FLAG_POL_ANY` covers bits 8–16. Bits 6–7 stay reserved for solver flags, which
-is why the newest policy bit is 16.
+They were one layer until 1.x, and mixing them cost: the flags reported facts
+for some repairs and decisions for others, an energy above the hottest state
+was treated as a collapse even in a hot near-vacuum cell (which blew up
+TreeGRRMHD's magnetized atmosphere tubes, request EOS-9), and an atmosphere
+reset discarded the clamps that preceded it
+([HISTORY](HISTORY.md#state-policy)). This design is ahead of the C++, which
+follows it, as it did for 1.1.0; it is not one of the
+[deliberate deviations](#deliberate-deviations-from-the-c).
 
-`ρ_FLOORED` is the signal a hydro code may need to act on. It arises in the
-entropy-floor repair, which keeps the inner solve's rapidity: for a thin, fast
-state `D/cosh w` falls below ρ_atm, the density is raised, and the returned
-conservatives carry more mass *and* more momentum than the input. Whether such a
-point should also be put at rest is left to the caller, since it depends on the
-evolution scheme (TreeGRRMHD does reset it). A rapidity cap also raises ρ, as
-D/cosh(w_cap), but preserves D, so it does not set `ρ_FLOORED`.
+### Level 1: projection
 
-### Two-level projection (proposed)
+`con2prim_safe` returns the valid state closest to the input and flags each
+face of the valid range that was active. It never replaces a state by the
+atmosphere and has no notion of collapse. `ProjectionOptions` describes the
+range:
 
-*Proposed 2026-10-22, not decided. It would replace the policy described above,
-and be a breaking change (2.0.0).*
-
-**Why.** `con2prim_safe` today does two jobs at once: it projects a state onto
-the valid range, which is mechanics, and decides what a state should become —
-the atmosphere, the collapse ceiling — which is physics and depends on the
-evolution scheme. Mixing them has costs. The flags report facts for some repairs
-and decisions for others. An energy above the hottest state is treated as a
-collapse and written at ρ_ceiling even for a hot near-vacuum cell, which blew up
-TreeGRRMHD's magnetized atmosphere tubes. An atmosphere reset discards the
-clamps that preceded it. And the policy carries options (`collapse_to_atmosphere`,
-`atm_trigger`, `s_atm`, `ye_atm`, `τ_max`) that only one of the two jobs needs.
-The proposal separates them.
-
-**Level 1: projection.** `con2prim_safe` returns the valid state closest to the
-input and flags each face of the valid range that was active. It never replaces
-a state by the atmosphere and has no notion of collapse. The valid range is
-
-- ρ ∈ [ρ_min, ρ_max] (today ρ_atm and ρ_ceiling),
+- ρ ∈ [ρ_min, ρ_max],
 - Yₑ ∈ [y_lo, y_hi], the table's range,
 - s ∈ [s_min(ρ, Yₑ), s_max(ρ, Yₑ)], the physical window,
-- w ∈ [0, w_cap].
+- w ≤ w_cap.
 
-That is seven faces. w ≥ 0 is not one, since w is a magnitude and the direction
-is carried separately. The two Yₑ faces share a bit; the returned Yₑ says which.
+w ≥ 0 is not a face, since w is a magnitude and the direction is carried
+separately.
 
-Each face is tested with a slack, and a state within it counts as valid: a few
-times the solver's tolerance, relative to the window's width for s and relative
-to the value for ρ and w, and one ulp for Yₑ. Without it a state written onto a
-face would not be a fixed point: the solver returns it only to its tolerance
-(s_max(1 ± ε), ρ_min(1 ± ε)), and even Yₑ·D/D can come back one ulp past y_hi,
-so the face would fire again.
+Each face is tested with a slack, `face_slack(T)`: 10⁻⁷ at Float64 and
+4·`con2prim_tol` (2.4·10⁻⁴) at Float32, relative to the window's width for s
+and to the value for ρ and w, and one ulp for Yₑ. Without it a state written
+onto a face would not be a fixed point: the solver returns it only to its
+conditioning, and even Yₑ·D/D can come back one ulp past y_hi, so the face
+would fire again. States are written exactly onto the face, so the slack is a
+one-sided band: it decides what counts as valid, not where a projection
+lands. The Float64 value is sized for a re-solve without a guess (see
+[The contract](#the-contract)).
 
 "Closest" has no metric: D, S and τ have different units, and a priority order
 does not work either (keeping D at the density ceiling would mean raising w,
-creating momentum). Instead each face has a rule. Change as little as possible,
-and prefer removing over adding:
+creating momentum). Instead each face fixes one primitive and frees one
+conservative, and moves it one way. Change as little as possible, and prefer
+removing over adding:
 
-| face | flag | what gives way |
-| --- | --- | --- |
-| s_max | `S_CEILED` | τ lowered |
-| s_min | `S_FLOORED` | τ raised (unavoidable) |
-| w_cap | `W_CAPPED` | S lowered |
-| ρ_max | `ρ_CEILED` | D lowered |
-| ρ_min | `ρ_FLOORED` | S lowered to w = acosh(D′/ρ_min), and D raised to D′ = max(D, ρ_min) |
-| y_lo, y_hi | `YE_CLAMPED` | D_Y set to Yₑ·D with Yₑ clamped |
+| bit | flag | face | what gives way |
+| --- | --- | --- | --- |
+| 11 | `ρ_FLOORED` | ρ_min | S lowered to w = acosh(D′/ρ_min), and D raised to D′ = max(D, ρ_min) |
+| 12 | `ρ_CEILED` | ρ_max | D lowered |
+| 13, 14 | `YE_FLOORED`, `YE_CEILED` | y_lo, y_hi | D_Y set to Yₑ·D with Yₑ clamped |
+| 15 | `S_FLOORED` | s_min | τ raised (unavoidable) |
+| 16 | `S_CEILED` | s_max | τ lowered |
+| 17 | `W_CEILED` | w_cap | S lowered |
 
 Quantities a row does not name are kept, to the solver's tolerance. Yₑ is kept
 when D changes, so D_Y moves with D: matter added or removed has the cell's
-composition. Where S is lowered in a magnetized state, the velocity's direction
-relative to B is kept, as `pol_package` keeps it today, so S may turn slightly.
+composition. Where S is lowered, the velocity's direction relative to B is taken
+from the input momentum at the new state's enthalpy density, which makes the
+returned S exactly parallel to the input: it is scaled, not turned. (`prim2con`
+carries that direction as `cos_vB` and recovers sin_vB from it, so where v is
+nearly along B, or B² ≫ z, the perpendicular part loses its relative digits.)
 
 The ρ_min row is one rule for both signs of D − ρ_min: a state with D ≥ ρ_min is
 slowed down until ρ = ρ_min and gains no mass, and a state with D < ρ_min is put
-at rest at ρ_min. The two meet continuously at D = ρ_min, where both give a state
-at rest, and the second adds the least mass possible.
+at rest at ρ_min. The two meet continuously at D = ρ_min, and the second adds
+the least mass possible. Capping w at fixed τ heats the cell: the kinetic energy
+taken out of S stays in τ. A cold state at W = 1000 capped to W = 100 needs
+h ≈ 10, and usually ends on the s_max face as well. That is deliberate: level 1
+keeps what it can, and a hot near-vacuum cell is for level 2.
+[HISTORY](HISTORY.md#state-policy) has the rejected alternatives.
 
-Capping w at fixed τ heats the cell: the kinetic energy taken out of S stays in
-τ. A cold state at W = 1000 capped to W = 100 needs h ≈ 10, and will usually end
-on the s_max face as well. That is deliberate. Level 1 keeps what it can, and a
-hot near-vacuum cell is for level 2 to deal with.
-[HISTORY](HISTORY.md#state-policy-flags) has the rejected alternatives: keeping
-D_Y rather than Yₑ, keeping S below ρ_min, and keeping s at w_cap.
+Two outcomes are not projections:
 
-Each face fixes one primitive and frees one conservative: ρ and D, w and S, s
-and τ, Yₑ and D_Y. The ρ_min face is the exception, freeing S where D ≥ ρ_min
-and fixing w = 0 and freeing both D and S where D < ρ_min. It is never active
-together with w_cap, since w = acosh(D/ρ_min) > w_cap would put ρ above ρ_min.
-So every set of active faces gives a square system, with as many conservatives
-kept as primitives left free. Every combination is arithmetic or a 1D root find,
-except ρ_max alone: it keeps S and τ at a fixed ρ, and needs a new 2D solve,
-con2prim at fixed ρ.
+| bit | flag | when |
+| --- | --- | --- |
+| 9 | `NONFINITE` | a non-finite input, D ≤ 0 (where Yₑ = D_Y/D is undefined), or B² < 0 |
+| 10 | `NOT_CONVERGED` | the solve failed, but the diagnosis finds a valid state inside the range |
 
-Most rows differ from 1.1.0. On the converged path, 1.1.0 clamps primitives and
-regenerates every conservative, where the rules keep each conservative a face
-does not free: w_cap keeps τ where 1.1.0 keeps s, ρ_max keeps S and τ where 1.1.0
-keeps w and s, and the s faces keep S where 1.1.0 keeps w. After a failed solve,
-a state at the ρ_min face with D ≥ ρ_min is slowed down rather than given mass,
-and an energy above the hottest state keeps D and S and lowers τ rather than
-going to ρ_max. Only the s_min branch of a failed solve is essentially unchanged.
+Both return a fixed valid state — ρ_min, at rest, s_min, and the input's
+Yₑ, clamped, or the middle of the Yₑ range for `NONFINITE` — only so that a
+kernel never propagates NaN. A clamped Yₑ keeps its flag, and the fixed state
+lies on that face. Level 2 is expected to
+replace it, so it takes no parameter. s_min is the least energy; the middle of
+the window at ρ_min would be radiation-dominated. No rescue is attempted (see
+the measurements below).
 
-Two outcomes are not projections, and get a bit of their own:
+#### Which faces are active
 
-- `NONFINITE`: a non-finite input, or D ≤ 0, where Yₑ = D_Y/D is undefined. There
-  is no closest valid state.
-- `NOT_CONVERGED` (new, bit 17): the solve failed but the diagnosis finds a valid
-  state inside the range, so there is nothing to project onto.
+Each set of active faces leaves a square system — every face fixes one primitive
+(ρ, w, s, Yₑ) and frees one conservative (D, S, τ, D_Y) — so it determines the
+state. The ρ_min face is the exception, fixing w = acosh(D/ρ_min) and freeing S
+where D ≥ ρ_min, and fixing w = 0 and freeing D and S where D < ρ_min. It is
+never active together with w_cap. Several sets can give a valid state; the rule
+that picks one is this: **the active set is the one in which every active face
+moves its freed conservative the way the table above says.** Where the inner
+root is unique, that set is unique. Two faces can each fix a state alone — a
+cold, fast state can be floored in s (τ raised, S kept) or capped in w (S
+lowered, τ kept) — and the rule picks the one whose sign holds.
 
-Both return a fixed valid state (ρ_min, at rest, the middles of the Yₑ range and
-the entropy window) only so that a kernel never propagates NaN. Level 2 is
-expected to replace it, so it takes no parameter. No rescue is attempted: the
-measured failures all lie where the inner root is not unique, and a bisection in
-s recovered none of them (see below).
+`con2prim_safe` decides it in the following steps. Only a state inside every
+face is taken from `con2prim`; anything else is decided by the diagnosis, so
+that a converged and a failed solve of neighbouring states project alike.
 
-The faces interact: the entropy window depends on ρ, ρ = D/cosh w, and w follows
-from S through h, which depends on s. Only Yₑ decouples, and is clamped first.
-The rest is an active-set problem: solve with no face active, add the violated
-face, re-solve in the remaining unknowns, repeat. The s-face solve is a root find
-in w with f₁(w) = 0 at s = s_edge(D/cosh w), consistent with the window at the
-density actually written (TreeGRRMHD's EOS-9 measured that the current
-endpoint solves, taken at the window of the failed solve's density, miss the
-written state's window by up to 0.27 of its width).
+1. **NONFINITE** as above, then the Yₑ faces, which decouple from the rest.
+2. **Faces decided by D alone.** D < ρ_min: every rapidity gives ρ < ρ_min, so
+   the state is put at rest at ρ_min with τ kept. D > ρ_max·cosh(w_cap): none
+   gives ρ ≤ ρ_max, so the ρ_max face is active.
+3. **The solve.** `con2prim` runs; if it converged inside every face, the input
+   comes back bit for bit (with D_Y = Yₑ·D if Yₑ was clamped).
+4. **The diagnosis.** On the rapidities at which keeping D leaves ρ and w in
+   range, w ∈ [w_lo, w_hi] with w_lo = acosh(max(D/ρ_max, 1)) and
+   w_hi = min(w_cap, acosh(D/ρ_min)), the states keeping D and S form a curve
+   that runs from cold and fast to hot and slow, along which the energy residual
+   G = f₂ rises. Along an entropy edge s = s_edge(D/cosh w), the curve's
+   crossing is a root of φ = tanh w − V. With φ evaluated on both edges at both
+   ends of the interval:
+   1. φ on the s_min edge > 0 at w_lo: the crossing lies above ρ_max, and every
+      state keeping D and S is too cold or too dense. Solve on the ρ_max face.
+   2. φ on the s_max edge < 0 at w_hi: every such state is too hot or too fast.
+      Solve on the w_hi face (w_cap or ρ_min, whichever bounds the interval).
+   3. Too cold at the cold end: the s_min edge's root if it is in the interval
+      and f₂ > 0 there (`S_FLOORED`); else the w_hi face, if the state there
+      carries less momentum than the input. If neither, go on.
+   4. Too hot at the hot end: the s_max edge's root if it is in the interval and
+      f₂ < 0 there (`S_CEILED`); else the ρ_max face, if that removes mass. If
+      neither, go on.
+   5. Neither. If one of the face states of steps 3 and 4 solves the input to the
+      tolerance, it is a solution on the face and is returned. Otherwise
+      `NOT_CONVERGED`.
 
-The face root find iterates on φ = tanh w − V rather than on f₁ = cosh w·φ. The
-two have the same sign and roots, and φ is what `f1_converged` tests, but f₁ is
-not monotone wherever V > 1, even at fixed s on an ideal gas. Illinois on
-[0, w_max] takes 6–18 / 17–25 / 49 evaluations (p50 / p99 / max) on φ, against
-18–22 / 25–36 / 60 on f₁. The s faces are diagnosed only at a density the ρ_max
-face has admitted: above ρ_max, where LS220 is extrapolated with cs² ≈ 1.4, f₂
-can fall in s by its whole span.
+   Where G is monotone, steps 3 and 4 cannot both succeed; testing cold first
+   only makes the choice deterministic where it is not. The tolerance case in
+   step 5 matters where the energy barely depends on s: for a cold state in
+   Float32 on `HybridEOS`, G is flat to within the tolerance across the whole
+   window, `con2prim` converges at any s, often outside the window, and without
+   step 5 such a state went to `NOT_CONVERGED`.
 
-Termination and uniqueness rest on φ being monotone in w along a face, and on
-G(s) = f₂(s, w*(s)), the energy residual at the inner root, being monotone in s.
-Measured on 2026-10-22 by `study/projection_faces.jl` on the five real tables:
-2,000 states per table, mode (hydrodynamic, MHD) and sampling (s uniform in the
-window, log T uniform), with τ scaled to aim at either branch, counting only
-states inside the other faces.
+The diagnosis evaluates the s faces only at densities the ρ_max face has
+admitted: above ρ_max, where LS220 is extrapolated with cs² ≈ 1.4, f₂ can fall in
+s by its whole span. Its edge root find is consistent with the window at the
+density actually written; TreeGRRMHD's EOS-9 measured that endpoint solves taken
+at the window of the failed solve's density miss the written state's window by
+up to 0.27 of its width.
+
+#### The face solves
+
+`core/faces.jl` has the three one-dimensional problems a set of active faces
+leaves:
+
+- **Along an entropy edge** (`edge_root`): the w that keeps S, by Illinois on φ
+  rather than on f₁ = cosh w·φ. The two have the same sign and roots, and φ is
+  what `f1_converged` tests, but f₁ is not monotone wherever V > 1, even at fixed
+  s on an ideal gas.
+- **At fixed ρ and w** (`face_solve` without `free_w`): the s that keeps τ, for
+  the w_cap and ρ_min faces. Endpoint signs at s_min(ρ) and s_max(ρ) give the s
+  corners.
+- **At fixed ρ, w following S** (`face_solve` with `free_w`): the same, for the
+  ρ_max face, which keeps S and τ. At fixed (ρ, s) the enthalpy is fixed, so the rapidity carrying S is pure
+  arithmetic (`w_from_momentum`, a concave root in sinh² w), and the solve is a
+  nested one-dimensional one rather than the two-dimensional con2prim at fixed ρ
+  first anticipated. If it needs w > w_cap, the w_cap face is active too.
+
+None of them can fail to return a state. Each is a bracketed find whose bracket
+lies inside the valid range, so every iterate is a valid state on its face. If
+one exhausts its budget, it returns its iterate with the smallest residual: valid
+and flagged, with only the conservative the face keeps off by more than the
+tolerance. That is not reported as `NOT_CONVERGED`, which would send a correct
+projection to the atmosphere. A non-finite result (an EOS evaluation returning
+NaN) gives the fixed state with `NOT_CONVERGED`.
+
+#### Where the answer is not unique
+
+Termination and uniqueness rest on φ being monotone in w along a face, and on G
+being monotone along the curve. Measured on 2026-10-22 by
+`study/projection_faces.jl` on the five real tables: 2,000 states per table,
+mode (hydrodynamic, MHD) and sampling (s uniform in the window, log T uniform),
+with τ scaled to aim at either branch, counting only states inside the other
+faces.
 
 - **The root find terminates.** It converges for all but 16 of 80,000
   state–face pairs, all in region (c) below. There the cold seam leaves ~10⁻⁸ of
   noise in φ, above the 10⁻¹² tolerance, and in one DD2 state φ jumps by 0.19
-  across its sign change.
+  across its sign change. Illinois takes 6–18 / 17–25 / 49 evaluations
+  (p50 / p99 / max) on φ, against 18–22 / 25–36 / 60 on f₁.
 - **The diagnosis is reliable where the inner root is unique.** G is
   non-monotone for 0–2.9% of states, by at most 4·10⁻⁴ of its span, and in none
   of 49,305 cold or hot diagnoses does it take the wrong sign anywhere in the
-  window. These inner solves were seeded from their neighbour in s, which keeps
-  them on one root; where there are several roots, a solve started elsewhere
-  can land on another (see below).
+  window.
 - **The answer is not always unique.** The share of states where φ along a face
   is non-monotone, and where it has more than one root (ranges over mode and
   sampling):
@@ -343,93 +380,127 @@ z·(1 − cs²)·tanh w gives dφ/dw·cosh² w ≥ 1 − cs²·tanh² w for any 
 fixed s every crossing rises, and the root is unique, wherever cs²·v² < 1. The
 solve at fixed s has the same multiple roots there (see [Open items](#open-items)),
 and they need fast flow through an acausal part of the table. Only (c), at most
-0.4% of states, comes from the edge's density dependence.
+0.4% of states, comes from the edge's density dependence. Where φ has several
+roots, the face find returns whichever root its bracketed find reaches, as
+`inner_solve_w` does; no rule picks among them
+([HISTORY](HISTORY.md#state-policy)), and the fixed-point invariant below does
+not need one.
 
-Where φ has several roots, the face find returns whichever root its bracketed
-find reaches, as `inner_solve_w` does. No rule picks among them: one was
-measured and rejected ([HISTORY](HISTORY.md#state-policy-flags)), and the
-fixed-point invariant below does not need it.
+Where the inner root is not unique, level 1 cannot keep its contract: a cold
+start can fail, and the edge solves of the diagnosis can land on another root,
+so that a valid state is projected onto a face. Measured on 2026-10-23 by
+`study/cold_failures.jl`: of 20,000 valid states per table (the sampling of
+`test/test_real_tables.jl`), a cold start failed on 8 (LS220), 16 (SRO LS220),
+10 (DD2, either version) and 3 (SFHo), all in region (a) or (b); a warm start
+failed on 2, both DD2. Of these 37 cold failures (counting DD2 once),
+`con2prim_safe` projects 33 onto a face — all 24 of LS220's and SRO LS220's onto
+ρ_max, which is the top of the table they lie at — and returns 4 as
+`NOT_CONVERGED`. (Before the con2prim fixes of
+[Deliberate deviations](#deliberate-deviations-from-the-c) there were 41; of
+those, 1.x's diagnosis found 29 outside the entropy window and sent 12 to the
+atmosphere.) A bisection in s, bracketed by either window, recovered none,
+because G jumps between roots. Regions (a) and (b) are wrong physics, to be
+fixed by repairing the tables, so this is accepted as a limitation
+([Open items](#open-items)).
 
-Where the inner root is not unique, level 1 cannot keep its contract. A cold
-start there can fail, and the endpoint solves of the diagnosis can land on
-another root, so that f₂ has the wrong sign and a valid state is projected onto
-an s face. Measured on 2026-10-23 by `study/cold_failures.jl`: of 20,000 valid
-states per table (the sampling of `test/test_real_tables.jl`), a cold start
-failed on 9 (LS220), 16 (SRO LS220), 11 (DD2, either version) and 5 (SFHo), all
-in region (a) or (b); a warm start failed on 2, both DD2. Of these 41 cold
-failures (counting DD2 once), 1.1.0's diagnosis finds 29 outside the entropy
-window, 18 too hot and 11 too cold, and sends 12 to the atmosphere, which in
-this design would be `NOT_CONVERGED`. A bisection in s, bracketed by either
-window, recovered none, because G jumps between roots. Regions (a) and (b) are
-wrong physics, to be fixed by repairing the tables, so this is accepted as a
-limitation ([Open items](#open-items)). The invariants below hold where the
-inner root is unique. The tests check them on states that avoid (a) and (b), and
-check there only that the output is valid.
+#### The contract
 
-The contract is a set of invariants:
+Where the inner root is unique:
 
-- a set face flag means that face was active, and level 1's returned state lies
-  on it, to the slack (where the inner root is unique, as above);
-- `policy_flags == 0` means `cons` is the input bit for bit, as today;
-- every output is a fixed point: fed back with its own primitives as the
-  guess, it returns flags 0 and, by the previous invariant, the same state bit
-  for bit. `con2prim` tests convergence at its guess before iterating, so this
-  holds whichever root the output is on; without a guess it holds where the root
-  is unique;
+- a set face flag means that face was active, and the returned state lies on it,
+  to the slack;
+- `policy_flags == 0` means `cons` is the input bit for bit;
+- every output is a fixed point: fed back with its own primitives as the guess,
+  it returns flags 0 and so, by the previous invariant, the same `cons` bit for
+  bit. `con2prim` tests convergence at its guess before iterating, so this holds
+  whichever root the output is on, even where the root is not unique. Without a
+  guess it holds where the re-solve is well conditioned; see below;
 - `check_con_state` never reports a face that `con2prim_safe` does not set. Its
-  cheap mode stays arithmetic, and each of its tests is sufficient: non-finite
+  cheap mode is arithmetic, and each of its tests is sufficient: non-finite
   input, D < ρ_min, D > ρ_max·cosh(w_cap), and Yₑ out of range. With
-  `check_endpoints` it also reports the s faces, sharing the diagnosis routine
-  with `con2prim_safe`; it can promise those only where no ρ face is active, and
-  reports none where one is.
+  `check_endpoints` it also runs the edge part of the diagnosis, and reports an
+  s face where that alone decides it and no ρ face is active. It takes
+  `con2prim_safe`'s branch on the edges themselves, but tests cold or hot on
+  the edges moved outward by the slack, and the energy residual against
+  `check_f2_tol`. A state within the slack of an edge, which `con2prim_safe`
+  returns unflagged, is then not reported either. Testing the edges themselves
+  reported 40% of states lying exactly on an edge, which is every state
+  `con2prim_safe` writes onto an s face, fed back. At Float32 the bar is 128
+  times the solver's tolerance, since the residual is noise at up to 65 times
+  it. Measured 2026-10-23 on states lying exactly on an edge: no false report in
+  5,000 per case on the synthetic table (both precisions) and the ideal gas
+  (Float32), nor in 3,000 per real table, except 6 on LS220. Those are on its
+  cold edge at Yₑ ≈ 0.06, where G touches zero at s_min and `con2prim` converges
+  on a second root inside the window: the root is not unique there.
 
-`project_prim_state` is the same projection on primitives, where every face is a
-plain clamp.
+A re-solve without a guess returns a state on a face only to its conditioning.
+Measured on 2026-10-23 by `study/cold_resolve.jl`: 5,000 states per table,
+pushed off a valid state by up to four decades in D, τ and S, each projected
+output re-solved cold. "Excess" is how far the re-solved state lies past its
+face, relative as for the slack:
 
-**Level 2: the application's physics.** A separate kernel-side function,
-`apply_policy(eos, in, out, pol1, pol2) -> Con2PrimSafeOut`, takes the input
-conservatives, level 1's output, both levels' policies (the atmosphere sits at
-level 1's ρ_min), and may replace the state by another valid one. It needs no
-further flags: it can compute ΔD, ΔS and Δτ from the two conservative states. It
-keeps level 1's bits and adds its own, so the face bits describe level 1's
-output, and `ATMOSPHERE` says that output was then replaced. EntropyEOS ships a
-reference implementation close to today's behaviour:
+| table | excess p99 | max | > 4·tol (old slack) | > 10⁻⁷ | re-flagged cold |
+| --- | --- | --- | --- | --- | --- |
+| synthetic | 6·10⁻⁹ | 6·10⁻⁷ | 930 of 4,638 | 1 | 1 |
+| LS220 | 5·10⁻⁹ | 2·10⁻⁵ | 360 of 3,899 | 29 | 146 |
+| SRO LS220 | 2·10⁻⁷ | 10⁻³ | 396 of 3,896 | 42 | 163 |
+| DD2 | 4·10⁻³ | 0.8 | 513 of 4,066 | 128 | 137 |
+| DD2 repaired | 4·10⁻³ | 0.8 | 570 of 4,067 | 127 | 135 |
+| SFHo | 4·10⁻⁹ | 0.7 | 477 of 3,995 | 31 | 68 |
 
-- `ρ_FLOORED`, or D < `atm_trigger`·ρ_min: the atmosphere at rest, at ρ_min, with
-  `s_atm` and `ye_atm`;
-- `ρ_CEILED` with `collapse_to_atmosphere`: the atmosphere;
-- `NONFINITE` and `NOT_CONVERGED`: the atmosphere.
+With a guess at the output none is re-flagged. Most of the excess is the
+solver's conditioning, which the slack of 10⁻⁷ covers; the tail is not. Where
+the excess is of order 1, as on DD2 and SFHo, the cold start found another
+root, in regions (a)–(c). Before the con2prim fixes of
+[Deliberate deviations](#deliberate-deviations-from-the-c), the synthetic table
+re-flagged 49 rather than 1: 43 of them were states put at rest at ρ_min on the
+s_max face, for which a cold `con2prim` failed although its best iterate was the
+state. At Float32 the slack cannot help: the re-solved s is off by whole window
+widths wherever τ cannot resolve the thermal energy
+([Precision and devices](#precision-and-devices)).
 
-Each sets `ATMOSPHERE`, and the level-1 bits beside it say why.
+`test/testutil.jl`'s `policy_violations` checks all of these, plus each row's
+kept and freed conservatives. On 2,000 states per real table, pushed off a valid
+state by up to four decades in D, τ and S, none is violated, even in regions (a)
+and (b), where the test only promises validity and the fixed point.
+
+`project_prim_state` is the same projection on primitives, where every face is
+a plain clamp with the same slack. A non-finite state, ρ ≤ 0 or w < 0 has no
+closest valid state and gives `NONFINITE` with the fixed state.
+
+### Level 2: physics
+
+`apply_policy(eos, in, out, proj, pol)` takes the input conservatives, level 1's
+output, and the options of both levels (the atmosphere sits at level 1's
+ρ_min), and may replace the state by another valid one. It needs no further
+flags: it can compute ΔD, ΔS and Δτ from the two conservative states. It keeps
+level 1's bits and adds its own, so the face bits describe level 1's output, and
+`ATMOSPHERE` (bit 8) says that output was then replaced. The reference
+implementation is close to 1.x's behaviour. The atmosphere — at rest, at
+ρ_min, with `s_atm` (default s_min) and `ye_atm` (default the input's Yₑ) —
+replaces:
+
+- `ρ_FLOORED`, or D < `atm_trigger`·ρ_min;
+- `ρ_CEILED` with `collapse_to_atmosphere`;
+- `NONFINITE` and `NOT_CONVERGED`.
 
 An application with its own rules (TreeGRRMHD puts any state with added rest
 mass at rest) replaces this function rather than configuring it.
 
-**What moves.** Level 1's policy keeps ρ_min, ρ_max and w_cap. `s_atm`, `ye_atm`,
-`atm_trigger` and `collapse_to_atmosphere` move to level 2's. `D_max` and
-`τ_max` go, and `policy_derive_bounds` with them: the cheap check computes
-ρ_max·cosh(w_cap) itself, and τ no longer short-circuits the solve (`τ_max` came
-from a 5×3 grid and stopped states the table represents). Bits 10–14 and 16 keep
-their numbers with the meaning "face", `NONFINITE` (15) stays at level 1, and
-`NOT_CONVERGED` (17) is new; `FLAG_POL_ANY` grows to bits 8–17. `ATMOSPHERE` (8)
-becomes level 2's bit. `CEILING` (9) is retired: with the face bits kept, it
-would say no more than `ATMOSPHERE | ρ_CEILED`.
+### Flags
 
-**Consequences.** Outputs and flags change for existing inputs, and
-`PolicyOptions` loses fields: 2.0.0. It is a departure from the C++ beyond the
-table under [Deliberate deviations](#deliberate-deviations-from-the-c), and the
-C++ follows, as it did for 1.1.0 (decided 2026-10-23). TreeGRRMHD's EOS-9 request is largely subsumed: its edge-consistent
-root find, its guards on the endpoint solves, the shared diagnosis with
-`check_con_state`, and dropping the `τ_max` test carry over. Its flag rules are
-replaced by the face flags, and its Q4 (an atmosphere carries only its cause) by
-level 2 keeping level 1's bits.
+The policy bits are 8–17, contiguous, and `FLAG_POL_ANY` masks them; bits 6–7
+stay reserved for solver flags. Level 2's bit comes first, then the outcomes
+that are not projections, then the faces in the order ρ, Yₑ, s, w. Every face
+flag names the bound it hit, FLOORED for a lower and CEILED for an upper one.
+The C++ uses the same numbering.
 
 ## Discipline in `core/`
 
 No heap allocation, no `throw`, no `@fastmath`, no closures, no `String`; array
 reads `@inbounds`, small helpers `@inline`. Kernel-side structs stay `isbits`;
 a NaN sentinel is not replaced with `Union{Nothing,T}`, because NaN is
-load-bearing and flows through arithmetic. Three consequences worth naming:
+load-bearing and flows through arithmetic. Four consequences worth naming:
 
 - **Domain-safe math.** `log10`, `sqrt` and `floor(Int, ·)` throw in Julia where
   C returns NaN or is merely unspecified. `core/defs.jl` provides `safe_log10`,
@@ -442,6 +513,14 @@ load-bearing and flows through arithmetic. Three consequences worth naming:
   type, not a literal, because a bare `Float64` literal silently widens `Float32`
   arithmetic. The `Float64` methods reproduce the C++'s measured values exactly;
   the generic ones scale with `eps(T)` so a narrower type at least runs.
+- **One call site per solver.** A GPU compiler inlines every call, and each
+  copy of a solver carries whole EOS evaluations. `con2prim_safe` therefore
+  decides first which solves to try and then runs them through one call site
+  each, and the face solves loop over their endpoints rather than evaluating
+  them at separate sites. Written the obvious way, with a solver call in every
+  branch, its Metal kernel crashed Apple's shader compiler after two minutes;
+  written this way it compiles in 15 s, against 24 s for 1.1.0's
+  ([HISTORY](HISTORY.md#state-policy)).
 - **The one stack buffer.** `bracket_scan` needs 33 entries live at once and
   cannot recompute them (each costs an inner solve, and the warm-start chain
   fixes their order). It uses `MVector{33,T}`, local and non-escaping so it is
@@ -463,6 +542,28 @@ C++ artifact into Julia for no benefit.
 | `view()` / `view_with()` | `EOSTableView` constructors | avoids shadowing `Base.view` |
 | out-parameters (`int &iters_out`, `real S_out[3]`) | extra tuple return values | tuples of isbits values return in registers |
 | `detail::` namespace and `aeval_`/`c2p_`/`pol_` prefixes | descriptive unexported names | one module namespace, no collisions with Base |
+
+Three numerical changes fix defects that the C++ shares. Together they made cold
+solves of states on an edge of the entropy window converge, where the C++ fails
+17 of 120 such states at rest on the synthetic table
+([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)):
+
+- **The T-solve ends with a Newton step.** When `evaluate`'s residual test
+  passes, it still takes the step that residual implies, if the step stays in
+  the bracket. The test admits an entropy error of 1e-12·|s|, which is a
+  relative error in U some 20 times con2prim's tolerance, and a warm start
+  already within it used to come back unchanged. The energy residual then
+  depended on the warm start and not only on s: Newton stalled just above its
+  tolerance, and at a root the residual's sign was noise. The step costs no
+  evaluation, because `eval_at` samples at the final u anyway, and it brings
+  the warm start's effect on U down to a few units in the last place.
+- **`bracket_scan` skips pairs of equal entropy.** Its uniform half's endpoints
+  duplicate `s_phys_lo` and `s_phys_hi`. With the root on an edge, the two
+  copies' solves could disagree in sign, and that empty pair, whose midpoint
+  is the anchor itself, was the one picked.
+- **An endpoint within tolerance is a bracket.** After the fallback re-solves
+  the scan's interval, an endpoint whose residual meets the tolerance no longer
+  fails the sign test.
 
 Everything else follows the C++ decision for decision, including the parts that
 look wrong until you read why: the Newton step is clamped and taken
@@ -508,7 +609,7 @@ no reference implementation, in this order:
    Others: the interpolation property, C² continuity at every seam as a
    convergence statement, exactly-exponential tail asymptotics, `U ≥ 0` over the
    extended box, σ monotone in u, prim2con→con2prim round trips, bitwise-idempotent
-   projection, and the policy layer's own bar — *the returned conservatives must
+   projection, and the projection's own bar — *the returned conservatives must
    re-solve and reproduce the returned primitives*.
 2. **Automatic differentiation** replaces every finite-difference check the C++
    has to use. The analytic `U_ρ`, `U_s`, `U_ρρ`, `U_ρs` and the con2prim
@@ -547,9 +648,10 @@ one that was found late, see [HISTORY](HISTORY.md#static-analysis)).
 
 `JET` asserts the property the GPU path depends on and that `@allocated` can
 only measure indirectly: no runtime dispatch and no type instability anywhere in
-`bspline_eval3`, `evaluate`, `prim2con`, `con2prim` or `con2prim_safe`. Analyse
-concrete argument types through a wrapper function — a closure over non-const
-globals reports its own captures as dynamic dispatch and buries the real signal.
+`bspline_eval3`, `evaluate`, `prim2con`, `con2prim`, `con2prim_safe` or
+`apply_policy`. Analyse concrete argument types through a wrapper function — a
+closure over non-const globals reports its own captures as dynamic dispatch and
+buries the real signal.
 JET tracks the compiler closely enough that its results can shift with a Julia
 release, so it is pinned to 1.11 and newer rather than letting a new Julia turn
 a green suite red.
@@ -635,6 +737,11 @@ Where the two can be compared, they agree.
   | p99 | 2.55e-09 | 2.43e-09 |
   | p99.9 | 1.03e-08 | 1.05e-08 |
 
+  This table predates the [numerical deviations](#deliberate-deviations-from-the-c),
+  when the two ran the same algorithm. With them, Julia's warm fallbacks on
+  LS220 drop to 0 and its cold failure and quantiles stay put, so the warm row
+  no longer matches the C++'s (measured in
+  [HISTORY](HISTORY.md#deliberate-deviations-from-the-c)).
   Matching the sampling matters: `con2prim_audit.cpp` uses 5%-per-side margins
   on the density box and entropy window and perturbs the warm start by 1e-3.
   Sampling the corners instead, or warm-starting from the exact truth, changes
@@ -656,6 +763,18 @@ Where the two can be compared, they agree.
   could lift it (untested) **(open)**, at the cost of departing from the C++'s
   representation.
 - `check_table` is serial; see "Threading".
+- **(open)** On CUDA.jl 6.4.2, a kernel that calls `con2prim_safe` and then
+  `apply_policy` faults with an illegal address on states pushed off the valid
+  range (2²⁰ such states, H200, either precision); on valid states it runs. Each
+  level alone runs on the same states, and so do two chained `con2prim_safe`
+  calls, in 1.1.0's code as in this one; compiled with `always_inline=true` the
+  fused kernel runs too (91 s to compile), and gives finite results, so the
+  states raise no genuine exception. The fault is a 1-byte write to address 0,
+  the signature of an exception reported through a null pointer, from inside
+  the separately compiled device functions CUDA.jl 6.4 links (`.extern .func`).
+  Inlining `apply_policy` or `pol_package`, and raising the stack limit to 64 kB,
+  did not help. Until it is understood, call the two levels from separate
+  kernels on CUDA. Metal is not affected.
 - `inner_solve_w`'s docstring claims a unique root at fixed s. That needs
   cs²·v² < 1 along the path, which the real tables violate in places: every one
   has cs² > 1 near its top density, at all temperatures (LS220 1.3–1.4, DD2
@@ -667,12 +786,21 @@ Where the two can be compared, they agree.
   lowest (measured by `study/projection_faces.jl` and
   `study/root_certificate.jl`, 2026-10-22). A causally repaired table would
   remove this; table repair is out of scope ([Scope](#scope)). On a cold start
-  it makes the solve fail, or the policy's endpoint diagnosis misclassify a
-  valid state, in a few in 10,000 valid states
-  ([Two-level projection](#two-level-projection-proposed)). A possible remedy,
+  it makes the solve fail, or the projection's diagnosis misclassify a valid
+  state, in a few in 10,000 valid states
+  ([Where the answer is not unique](#where-the-answer-is-not-unique)). A possible remedy,
   not proposed: on the failure path only, follow each root through an ordered
   sweep in s, seeding every inner solve from its neighbour, and diagnose and
   solve on those roots.
-- **(proposed)** Splitting `con2prim_safe` into a projection that reports faces
-  and a separate, replaceable physics layer; see
-  [Two-level projection](#two-level-projection-proposed).
+- **(open)** On a table's cold edge the energy residual cannot always meet the
+  tolerance. `eval_at` forms U as (1 + Û)/κ − 1, so U is resolved to
+  eps(1 + U) absolutely, and at rest f₂ to about eps/U: 1.2e-12 on the
+  synthetic table's coldest states, where U ≈ 2e-4, against a tolerance of
+  1e-12. Newton converges on every such state sampled, but the fallback
+  re-solves its interval's ends from a fresh warm start, which can flip the sign
+  of a residual at that floor, and a state whose root is that end then fails as
+  `failed_no_bracket`. With the Newton disabled and the warm start perturbed,
+  5 of 960 states on the edges of the window fail this way (22 before the
+  [deviations](#deliberate-deviations-from-the-c) of 2026-10-23). Two possible
+  remedies, both untested: a tolerance with a floor of a few eps·z/τ, or a scan
+  that returns its ends' warm starts so that the re-solve reproduces them.

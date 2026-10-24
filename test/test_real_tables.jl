@@ -130,33 +130,39 @@ else
                 @test p(0.99) < 1e-7
                 @test p(0.999) < 1e-6
 
-                # The never-fails layer on real data.
-                pol = default_policy(v, exp10(v.x_lo))
-                good = let ρ = exp10(0.5 * (v.x_lo + v.x_hi)), yₑ = 0.3
-                    sr = srange(v, ρ, yₑ)
-                    cc = prim2con(v, ρ, 0.5 * (sr.s_min + sr.s_max), yₑ, 0.8, 0.0, 0.0, NaN)
-                    Con2PrimIn(cc.D, cc.τ, cc.D_Y, cc.S_par, cc.S_perp, cc.B²)
+                # The projection on real data: invalid states made by pushing
+                # valid ones off in D, τ and S. The invariants are promised
+                # only where the inner root is unique, which excludes the
+                # acausal regions (a) and (b) of CODE.md; there only validity
+                # and the fixed point are checked.
+                proj = default_projection(v, exp10(v.x_lo))
+                nbad = nbad_strict = nfalse = 0
+                for _ in 1:2000
+                    st = _sample_real_state(v, rng)
+                    c = prim2con(v, st.ρ, st.s, st.yₑ, st.w, st.B², st.cos_vB, st.u)
+                    r() = exp10(-4 + 8rand(rng))
+                    k = rand(rng, 1:4)
+                    fD = k in (1, 4) ? r() : 1.0
+                    fτ = k in (2, 4) ? r() : 1.0
+                    fS = k in (3, 4) ? r() : 1.0
+                    cin = Con2PrimIn(fD * c.D, fτ * c.τ, fD * c.D_Y, fS * c.S_par, fS * c.S_perp, c.B²)
+                    out = con2prim_safe(v, cin, opts, proj)
+                    bad = policy_violations(v, proj, opts, cin, out)
+                    strict = filter(in(("non-finite", "invalid", "flags 0 but not the input", "not a fixed point")), bad)
+                    nbad_strict += !isempty(strict)
+                    # Away from (a), the top of the table, and (b), its hottest
+                    # edge at low density.
+                    b = out.base
+                    sr = srange(v, b.ρ, b.ye)
+                    acausal = b.ρ > 1e14 * v.κ || (b.ρ < 1e8 * v.κ && b.s > sr.s_max - 0.05 * (sr.s_max - sr.s_min))
+                    acausal || (nbad += !isempty(bad))
+                    isempty(bad) || nbad <= 3 && @info "$(tab.name): violated" cin out.policy_flags bad
+                    nfalse += check_con_state(v, cin, proj; check_endpoints=true) & ~out.policy_flags != 0
                 end
-                for bad in (Con2PrimIn(good.D, NaN, good.D_Y, good.S_par, good.S_perp, 0.0),
-                            Con2PrimIn(-1.0, good.τ, good.D_Y, good.S_par, good.S_perp, 0.0),
-                            Con2PrimIn(1e-20, good.τ, 1e-21, 0.0, 0.0, 0.0),
-                            Con2PrimIn(1e30, good.τ, 0.3e30, good.S_par, good.S_perp, 0.0),
-                            Con2PrimIn(good.D, good.τ * 1e-10, good.D_Y, good.S_par, good.S_perp, 0.0),
-                            Con2PrimIn(good.D, good.τ, good.D_Y, 1e30, 0.0, 0.0))
-                    sa = con2prim_safe(v, bad, opts, pol)
-                    @test sa.policy_flags != 0
-                    @test all(isfinite, (sa.base.ρ, sa.base.s, sa.base.w, sa.cons.D, sa.cons.τ))
-                    ps = PrimState(sa.base.ρ, sa.base.s, sa.base.ye, sa.base.w)
-                    @test check_prim_state(v, ps, pol) == 0
-                    # The acceptance bar: the returned conservatives must
-                    # re-solve and reproduce the returned primitives.
-                    re = con2prim(v, Con2PrimIn(sa.cons.D, sa.cons.τ, sa.cons.D_Y, sa.cons.S_par,
-                                                sa.cons.S_perp, sa.cons.B²), opts, sa.base.s,
-                                  sa.base.w, sa.base.eos.u_solved)
-                    @test re.result === E.C2PResult.converged_newton ||
-                          re.result === E.C2PResult.converged_fallback
-                    @test abs(re.ρ - sa.base.ρ) / sa.base.ρ < 1e-9
-                end
+                @info "$(tab.name): projection" nbad nbad_strict nfalse
+                @test nbad_strict == 0
+                @test nbad == 0
+                @test nfalse == 0
             end
         end
 

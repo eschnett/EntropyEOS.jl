@@ -228,6 +228,16 @@ end
         # The warm start is threaded explicitly, so the two calls are otherwise
         # independent: evaluating twice from the same guess gives the same answer.
         @test evaluate(v, ρ, s, yₑ, cold.u_solved).U == evaluate(v, ρ, s, yₑ, cold.u_solved).U
+
+        # A warm start already inside the T-solve's tolerance must not leak into
+        # the answer: con2prim's energy residual sees U to 1e-12, and the
+        # tolerance alone admits 20 times that. U is resolved to eps(1 + U)
+        # absolutely, because of the κ re-zeroing.
+        for s in (s, srange(v, ρ, yₑ).s_min, srange(v, ρ, yₑ).s_max), du in (-1e-11, -1e-12, 1e-12, 1e-11)
+            ref = evaluate(v, ρ, s, yₑ, NaN)
+            pt = evaluate(v, ρ, s, yₑ, ref.u_solved + du)
+            @test abs(pt.U - ref.U) <= 16 * eps(1 + ref.U)
+        end
     end
 
     @testset "allocation-free and type-generic" begin

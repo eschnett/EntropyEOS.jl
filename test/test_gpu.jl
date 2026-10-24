@@ -56,6 +56,16 @@ else
             @inbounds outρ[i] = o.ρ
         end
 
+        # Both levels of the never-fails path in one kernel.
+        @eval @kernel function _gpu_safe!(outρ, outf, @Const(D), @Const(τ), @Const(DY), @Const(Sp), @Const(Sq),
+                                          @Const(B2), v, opts, proj, pol)
+            i = @index(Global)
+            cin = Con2PrimIn(D[i], τ[i], DY[i], Sp[i], Sq[i], B2[i])
+            o = EntropyEOS.apply_policy(v, cin, EntropyEOS.con2prim_safe(v, cin, opts, proj), proj, pol)
+            @inbounds outρ[i] = o.base.ρ
+            @inbounds outf[i] = o.policy_flags
+        end
+
         @testset "GPU ($GPU_BACKEND, $T)" for T in GPU_ELTYPES
             E = EntropyEOS
             tbl = make_synthetic_table()
@@ -116,6 +126,45 @@ else
                 @test all(isfinite, outg)
                 rel = maximum(abs.(outg .- outc) ./ abs.(outc))
                 @info "GPU con2prim: max relative difference from host" rel
+                @test rel < sqrt(eps(T)) * 100
+            end
+
+            @testset "con2prim_safe and apply_policy" begin
+                # Valid states pushed onto every kind of face: too hot, too
+                # cold, too fast, below ρ_min, above ρ_max.
+                D = T[]; τ = T[]; DY = T[]; Sp = T[]; Sq = T[]; B2 = T[]
+                for (k, ρ) in enumerate(ρs)
+                    c = prim2con(v, ρ, mid(ρ), yₑ, T(0.1 + 1.5k / n), zero(T), zero(T), T(NaN))
+                    fD, fτ, fS = ((1, 1e4, 1), (1, 1e-8, 1), (1, 1, 1e3), (1e-9, 1, 1), (1e9, 1, 1))[mod1(k, 5)]
+                    push!(D, T(fD) * c.D); push!(τ, T(fτ) * c.τ); push!(DY, T(fD) * c.D_Y)
+                    push!(Sp, T(fS) * c.S_par); push!(Sq, T(fS) * c.S_perp); push!(B2, c.B²)
+                end
+                opts = Con2PrimOptions{T}()
+                proj = default_projection(v, exp10(T(v.x_lo) + one(T)))
+                pol = PolicyOptions{T}()
+
+                outc = zeros(T, n)
+                flagc = zeros(UInt32, n)
+                _gpu_safe!(CPU(), 64)(outc, flagc, D, τ, DY, Sp, Sq, B2, v, opts, proj, pol; ndrange=n)
+                KernelAbstractions.synchronize(CPU())
+
+                dout = DEVARRAY(zeros(T, n))
+                dflag = DEVARRAY(zeros(UInt32, n))
+                _gpu_safe!(BACKEND, 64)(dout, dflag, DEVARRAY(D), DEVARRAY(τ), DEVARRAY(DY), DEVARRAY(Sp),
+                                        DEVARRAY(Sq), DEVARRAY(B2), dv, opts, proj, pol; ndrange=n)
+                KernelAbstractions.synchronize(BACKEND)
+                outg, flagg = Array(dout), Array(dflag)
+
+                @test all(isfinite, outg)
+                @test all(!=(0), flagg)
+                # A state near a face's boundary may legitimately land on
+                # another face on another device; most must agree, and where
+                # they agree so must the density.
+                same = flagg .== flagc
+                @info "GPU con2prim_safe: flags agree with host" fraction = count(same) / n
+                @test count(same) >= 0.99n
+                rel = maximum(abs.(outg[same] .- outc[same]) ./ outc[same])
+                @info "GPU con2prim_safe: max relative difference from host" rel
                 @test rel < sqrt(eps(T)) * 100
             end
         end

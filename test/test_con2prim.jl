@@ -168,6 +168,49 @@ end
         end
     end
 
+    @testset "cold states on the edges of the entropy window" begin
+        # What the projection produces: a state put at rest, or nearly, with
+        # its entropy exactly on an edge of the physical window. Cold solves of
+        # these used to fail as `failed_no_bracket` while returning the state
+        # itself, a third of them at ρ_min.
+        nfail = 0
+        maxρ = maxs = 0.0
+        for x in (v.x_lo, 0.5 * (v.x_lo + v.x_hi)), yₑ in range(v.y_lo, v.y_hi; length=9),
+            edge in (:s_min, :s_max), w in (0.0, 1e-3)
+
+            ρ = exp10(x)
+            s = getfield(srange(v, ρ, yₑ), edge)
+            cin, _ = forward(ρ, s, yₑ, w, 0.0, 0.0)
+            out = con2prim(v, cin, opts)
+            out.result === E.C2PResult.converged_newton ||
+                out.result === E.C2PResult.converged_fallback || (nfail += 1)
+            maxρ = max(maxρ, abs(out.ρ - ρ) / ρ)
+            maxs = max(maxs, abs(out.s - s) / s)
+        end
+        @test nfail == 0
+        @test maxρ < 1e-11
+        @test maxs < 1e-11
+    end
+
+    @testset "bracket_scan never returns an empty bracket" begin
+        # The scan's candidates include both edges of the physical window
+        # twice. With the root on an edge the two copies' solves can disagree
+        # in sign, and that zero-width pair used to be the one picked.
+        nempty = 0
+        for x in range(v.x_lo, v.x_hi; length=4), yₑ in (0.1, 0.3, 0.5), edge in (:s_min, :s_max)
+            ρ = exp10(x)
+            s = getfield(srange(v, ρ, yₑ), edge)
+            cin, pt = forward(ρ, s, yₑ, 0.0, 0.0, 0.0)
+            for u in (NaN, pt.u_solved - 1e-11, pt.u_solved + 1e-11)
+                scan = E.bracket_scan(v, cin.D, cin.τ, yₑ, cin.S_par, cin.S_perp, cin.B², opts.w_max,
+                                      opts.τ_floor_rel, opts.bracket_scan, s, 0.0, 0.0, u, opts.max_iter_1d,
+                                      opts.tol)
+                scan.bracketed && !(scan.s_lo < scan.s_hi) && (nempty += 1)
+            end
+        end
+        @test nempty == 0
+    end
+
     @testset "cold seed accuracy" begin
         # The seed exists so the Newton starts in the right neighbourhood; the
         # C++ measures it as landing within 20% on magnetized states.

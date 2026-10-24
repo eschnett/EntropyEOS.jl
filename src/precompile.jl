@@ -48,14 +48,21 @@ using PrecompileTools: @compile_workload
     con2prim(v, cin, copts, s, 0.8, pt.u_solved)   # warm
     con2prim(v, cin, copts)                        # cold: seed and, on this table, the fallback
 
-    pol = default_policy(v, exp10(v.x_lo))
+    proj = default_projection(v, exp10(v.x_lo))
+    pol = PolicyOptions()
     ps = PrimState(ρ, s, yₑ, 0.8)
-    check_prim_state(v, ps, pol)
-    project_prim_state(v, ps, pol)
-    check_con_state(v, cin, pol)
-    con2prim_safe(v, cin, copts, pol)
-    # The excision branch compiles separately from the ordinary one.
-    con2prim_safe(v, Con2PrimIn(cin.D, NaN, cin.D_Y, cin.S_par, cin.S_perp, cin.B²), copts, pol)
+    check_prim_state(v, ps, proj)
+    project_prim_state(v, ps, proj)
+    check_con_state(v, cin, proj)
+    out = con2prim_safe(v, cin, copts, proj)
+    apply_policy(v, cin, out, proj, pol)
+    # The other branches compile separately from the ordinary one: the fixed
+    # state, the s faces and the ρ_max face.
+    for bad in (Con2PrimIn(cin.D, NaN, cin.D_Y, cin.S_par, cin.S_perp, cin.B²),
+                Con2PrimIn(cin.D, 1e-10 * cin.τ, cin.D_Y, cin.S_par, cin.S_perp, cin.B²),
+                Con2PrimIn(1e3 * exp10(v.x_hi), cin.τ, cin.D_Y, cin.S_par, cin.S_perp, cin.B²))
+        apply_policy(v, bad, con2prim_safe(v, bad, copts, proj), proj, pol)
+    end
 
     ig = IdealGasEOS(; Γ=2.0, K_ref=100.0, s_ref=5.0, s_window=(1.0, 20.0), ρ_bounds=(1e-10, 1e-2),
                      yₑ_bounds=(0.0, 1.0))
@@ -66,8 +73,9 @@ using PrecompileTools: @compile_workload
     cin = Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²)
     con2prim(ig, cin, copts, 5.0, 0.8, NaN)
     con2prim(ig, cin, copts)
-    pol = default_policy(ig, 1e-9)
-    project_prim_state(ig, PrimState(ρ, 5.0, 0.5, 0.8), pol)
-    con2prim_safe(ig, cin, copts, pol)
-    con2prim_safe(ig, Con2PrimIn(cin.D, NaN, cin.D_Y, cin.S_par, cin.S_perp, cin.B²), copts, pol)
+    proj = default_projection(ig, 1e-9)
+    project_prim_state(ig, PrimState(ρ, 5.0, 0.5, 0.8), proj)
+    apply_policy(ig, cin, con2prim_safe(ig, cin, copts, proj), proj, pol)
+    bad = Con2PrimIn(cin.D, NaN, cin.D_Y, cin.S_par, cin.S_perp, cin.B²)
+    apply_policy(ig, bad, con2prim_safe(ig, bad, copts, proj), proj, pol)
 end

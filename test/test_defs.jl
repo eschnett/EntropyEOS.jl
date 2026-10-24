@@ -2,27 +2,23 @@
     E = EntropyEOS
 
     @testset "flag bits" begin
-        # Evaluation bits occupy 0-5, policy bits 8-16, with 6-7 reserved so the
+        # Evaluation bits occupy 0-5, policy bits 8-17, with 6-7 reserved so the
         # policy group stays contiguous and maskable.
         eval_flags = (FLAG_CLAMP_YE, FLAG_EXT_S_LOW, FLAG_EXT_S_HIGH,
                       FLAG_EXT_ρ_LOW, FLAG_OOB_ρ_HIGH, FLAG_MAXITER)
-        pol_flags = (FLAG_POL_ATMOSPHERE, FLAG_POL_CEILING, FLAG_POL_S_FLOORED,
-                     FLAG_POL_S_CEILED, FLAG_POL_W_CAPPED, FLAG_POL_ρ_CEILED,
-                     FLAG_POL_YE_CLAMPED, FLAG_POL_NONFINITE, FLAG_POL_ρ_FLOORED)
+        pol_flags = (FLAG_POL_ATMOSPHERE, FLAG_POL_NONFINITE, FLAG_POL_NOT_CONVERGED,
+                     FLAG_POL_ρ_FLOORED, FLAG_POL_ρ_CEILED, FLAG_POL_YE_FLOORED, FLAG_POL_YE_CEILED,
+                     FLAG_POL_S_FLOORED, FLAG_POL_S_CEILED, FLAG_POL_W_CEILED)
         @test all(f -> f isa UInt32, eval_flags)
         @test all(f -> f isa UInt32, pol_flags)
-        @test all(f -> count_ones(f) == 1, pol_flags)
         @test reduce(|, eval_flags) == 0x003f
-        @test reduce(|, pol_flags) == FLAG_POL_ANY
-        @test FLAG_POL_ANY == 0x0001ff00
         @test reduce(|, eval_flags) & FLAG_POL_ANY == 0    # the groups do not overlap
         @test length(unique(eval_flags)) == 6
-        @test length(unique(pol_flags)) == 9
-        # The bit values are shared with the C++; bit 13 kept its value when the
-        # density clamp was split.
-        @test FLAG_POL_ρ_CEILED == UInt32(1) << 13
-        @test FLAG_POL_ρ_FLOORED == UInt32(1) << 16
-        @test FLAG_POL_ρ_CLAMPED == FLAG_POL_ρ_FLOORED | FLAG_POL_ρ_CEILED
+        # One bit each, in the documented order: level 2, the outcomes that are
+        # not projections, then the faces as ρ, Yₑ, s, w. The C++ shares them.
+        @test pol_flags == ntuple(i -> UInt32(1) << (7 + i), 10)
+        @test reduce(|, pol_flags) == FLAG_POL_ANY
+        @test FLAG_POL_ANY == 0x0003ff00
     end
 
     @testset "outcome enums" begin

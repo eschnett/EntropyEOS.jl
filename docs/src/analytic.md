@@ -1,6 +1,6 @@
 # Analytic EOSs
 
-The solver and the policy layer are written against an interface, not
+The solver and both policy levels are written against an interface, not
 against the table. Two closed-form equations of state implement it next to
 [`EOSTableView`](@ref): an ideal gas and a hybrid EOS. These are what the standard
 relativistic test problems need — shock tubes at `Γ = 2`, TOV stars on a
@@ -14,10 +14,11 @@ eos = IdealGasEOS(; Γ=2.0, K_ref=100.0, s_ref=5.0, s_window=(1.0, 20.0),
 s = polytropic_entropy(eos, 100.0)          # the polytrope p = 100 ρ²
 pt = evaluate(eos, 1.28e-3, s, 0.5, NaN)
 
-pol = default_policy(eos, 1e-10)
+proj = default_projection(eos, 1e-10)
 c = prim2con(eos, 1.28e-3, s, 0.5, 0.8, 0.0, 0.0, NaN)
-out = con2prim_safe(eos, Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²),
-                    Con2PrimOptions(), pol)
+cons = Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²)
+out = con2prim_safe(eos, cons, Con2PrimOptions(), proj)
+out = apply_policy(eos, cons, out, proj, PolicyOptions())
 ```
 
 Both are `isbits`, so they go into a GPU kernel as they are: they need no
