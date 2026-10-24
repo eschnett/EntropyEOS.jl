@@ -481,10 +481,12 @@ The throughput table it superseded, H200, LS220, millions of states per second:
 comparison with the C++ had been run by hand against a local build. The
 JLL ships only executables and a static C++ library with no C interface, so
 reports, not function values, are compared. The first run found that the JLL's
-macOS build contracts `fd3`'s stencil into FMAs. That flips `delta_T` on
-plateau nodes between "skipped" and ~1e17 (see
-[CODE.md](CODE.md#validation-against-the-c)); it is a build setting, not a
-translation difference.
+macOS build contracts `fd3`'s stencil into FMAs. That flipped `delta_T` on 290
+of the 330 plateau nodes between "skipped" and ~1e17 (see
+[CODE.md](CODE.md#validation-against-the-c)). EntropyEOS_jll 1.1.0+1 is built
+with `-ffp-contract=off`, which leaves 2 such nodes on macOS; those come from a
+one-ulp difference between macOS's `__exp10` and Julia's `exp10`, so the test
+keeps the exemption.
 
 ### Static analysis
 

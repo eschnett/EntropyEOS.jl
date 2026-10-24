@@ -771,8 +771,8 @@ What is easy to get wrong here:
 Where the two can be compared, they agree.
 
 - **In the test suite**, `test/test_cpp_crosscheck.jl` runs the C++ `eos_test`
-  from EntropyEOS_jll (1.1.0). The C++ writes its three synthetic tables (clean,
-  seeded, dirty), and both implementations then read the same file. On this
+  from EntropyEOS_jll (1.1.0+1). The C++ writes its three synthetic tables
+  (clean, seeded, dirty), and both implementations then read the same file. On this
   Mac (aarch64), measured:
   - the generators agree to 8e-16;
   - every `check_table` class count matches, and every node's metric agrees to
@@ -783,17 +783,20 @@ Where the two can be compared, they agree.
     Julia solves exactly the C++'s 20,000 states.
 
   The one expected difference is `delta_T` at the 330 nodes of the dirty table
-  whose T stencil spans its planted logenergy plateau; on this Mac, 290 of them
-  differ. There the three ε values
-  are equal, so the stencil sum is exactly 0 in Julia and in an uncontracted C++
-  build. Julia's δ_T then overflows to Inf, and the node is skipped as if its
-  input were non-finite, which the C++ does too. Clang contracts the sum into
-  FMAs by default, though, which leaves a residual of about 6 and reports
-  δ_T ≈ 3e17 there. Which side skips which plateau nodes depends on the
-  platform's build: on Linux x86-64 the C++ skips some that Julia evaluates. The
-  plateau itself is reported by `logenergy_nonmonotone_T` either way. The test
-  exempts exactly these nodes, in both directions, and requires all others to
-  agree.
+  whose T stencil spans its planted logenergy plateau. There the ε values are
+  equal, so the stencil sum is 0 in exact arithmetic, and what either side
+  computes is a rounding residual that depends on the last bit of each ε. If
+  the residual is exactly 0, δ_T overflows to Inf and the node is skipped as if
+  its input were non-finite; otherwise it is reported as 1e16 to 1e17. Two
+  things move that last bit. The FMA contractions clang makes by default made
+  290 of the 330 nodes differ on this Mac; the JLL is built with
+  `-ffp-contract=off` since 1.1.0+1, which leaves 2. The math library makes the
+  rest: clang turns `pow(10, x)` into macOS's `__exp10`, which is one ulp from
+  Julia's `exp10` at those 2 nodes. On Linux x86-64, where the build never
+  contracted, the C++ skipped some nodes that Julia evaluates, presumably from
+  glibc's rounding. The plateau itself is reported by `logenergy_nonmonotone_T`
+  either way. The test exempts exactly these nodes, in both directions, and
+  requires all others to agree.
 - The fitted B-spline coefficients are **bitwise identical** when the C++ is
   built with `-ffp-contract=off`. At clang's default some differ in the last
   bits, because clang fuses the elimination update into an FMA and Julia does

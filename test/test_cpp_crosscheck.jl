@@ -4,13 +4,12 @@
 # the JLL exposes executables and no callable library.
 #
 # One difference is expected and tolerated: on a logenergy plateau (planted in
-# the dirty table) the three ε values of a T stencil are equal, and whether
-# `fd3` returns exactly 0 or a rounding residual there depends on how the build
-# evaluates the stencil sum (clang contracts it into FMAs by default; Julia
-# never does). With a zero derivative `delta_T` overflows to Inf and the node is
-# skipped; with a residual it is reported as ~1e17. Either side may skip such a
-# node, depending on the platform's build, so they are excluded below, and
-# every other node must agree.
+# the dirty table) the ε values of a T stencil are equal, so `fd3` returns a pure
+# rounding residual, which depends on the last bit of each ε (the platform's
+# exp10) and on whether the build contracts the sum into FMAs. With a zero
+# residual `delta_T` overflows to Inf and the node is skipped; otherwise it is
+# reported as 1e16 to 1e17. Either side may skip such a node, depending on the
+# platform, so they are excluded below, and every other node must agree.
 
 const CPP_AVAILABLE = EntropyEOS_jll.is_available()
 
