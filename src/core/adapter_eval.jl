@@ -568,7 +568,16 @@ hard out-of-bounds flag, because a converged state there is invalid outright --
 the tail exists only so the iteration stays finite rather than to make the
 answer meaningful.
 """
-function evaluate(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where {S,T}
+@inline evaluate(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where {S,T} =
+    evaluate_windowed(v, ρ★, s, yₑ, u_guess)[1]
+
+"""
+    locate(v, ρ★, yₑ)
+
+The log-density and electron fraction an evaluation uses, and the flags that
+placing them sets: `(x_use, y, flags)`.
+"""
+@inline function locate(v::EOSTableView{S}, ρ★::T, yₑ::T) where {S,T}
     flags = UInt32(0)
 
     # Locate ρ against the physical and extended boxes.
@@ -592,92 +601,141 @@ function evaluate(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where
         y = T(v.y_hi)
         flags |= FLAG_CLAMP_YE
     end
+    return x_use, y, flags
+end
 
-    # Solve σ_ext(x_use, u, y) = s for u on the extended bracket. The u-tail's
-    # slope floor keeps σ_ext strictly increasing in u, so the bracket is
-    # globally invertible and the safeguarded iteration cannot fail.
-    spec = σ_ext_spec(v)
-    σ_lo = extended_sample(v.σ, x_use, T(v.u_ext_lo), y, spec)
-    σ_hi = extended_sample(v.σ, x_use, T(v.u_ext_hi), y, spec)
+"""
+    solve_u(fld, spec, x, y, target, lo, hi, u_guess, max_iter)
 
-    u = zero(T)
-    iters = Int32(0)
-    if s <= σ_lo.f
-        u = T(v.u_ext_lo)          # below even the extended bracket
-    elseif s >= σ_hi.f
-        u = T(v.u_ext_hi)
+Solve `f(x, u, y) = target` for the log-temperature `u` on `[lo, hi]`, where
+`f` is the extended field `fld` and strictly increasing in `u`. Returns
+`(u, iters, converged, f(lo), f(hi))`; a target outside the bracket returns the
+end it lies beyond, as converged.
+
+The u-tail's slope floor keeps both fields strictly increasing in `u`, so the
+bracket is globally invertible and the safeguarded iteration cannot fail.
+"""
+@inline function solve_u(fld::BsplineView3{S}, spec::ExtSpec{P}, x::T, y::T, target::T, lo::T, hi::T, u_guess::T,
+                         max_iter::Int32) where {S,P,T}
+    f_lo = extended_sample(fld, x, lo, y, spec).f
+    f_hi = extended_sample(fld, x, hi, y, spec).f
+
+    target <= f_lo && return lo, Int32(0), true, f_lo, f_hi     # below even the extended bracket
+    target >= f_hi && return hi, Int32(0), true, f_lo, f_hi
+
+    uu = if !isnan(u_guess)
+        clamp(u_guess, lo, hi)
     else
-        lo = T(v.u_ext_lo)
-        hi = T(v.u_ext_hi)
-        uu = if !isnan(u_guess)
-            clamp(u_guess, lo, hi)
-        else
-            # A secant estimate from the endpoints beats a plain midpoint start.
-            clamp(lo + (hi - lo) * (s - σ_lo.f) / (σ_hi.f - σ_lo.f), lo, hi)
-        end
-
-        s_scale = abs(s) > one(T) ? abs(s) : one(T)
-        converged = false
-        while iters < v.max_iter
-            iters += one(Int32)
-            e = extended_sample(v.σ, x_use, uu, y, spec)
-            g = e.f - s
-
-            # Maintain the bracket by sign; σ_ext increases with u.
-            g < zero(T) ? (lo = uu) : (hi = uu)
-
-            if abs(g) <= tsolve_residual_tol(T) * s_scale
-                # Take the Newton step the residual already pays for. The
-                # tolerance admits an entropy error of 1e-12·|s|, which is a
-                # relative error in U some 20 times above con2prim's own
-                # tolerance; a warm start that already sits inside it would
-                # otherwise come back unchanged, so the solver's outer
-                # residual would depend on the warm start rather than on s
-                # alone. One step makes that error quadratic, and is free:
-                # eval_at samples at the final u anyway.
-                if e.fu > zero(T)
-                    u_pol = uu - g / e.fu
-                    lo < u_pol < hi && (uu = u_pol)
-                end
-                converged = true
-                break
-            end
-
-            # Newton, accepted only if it stays inside the bracket and the
-            # slope is positive there; bisect otherwise.
-            u_next = zero(T)
-            newton_ok = false
-            if e.fu > zero(T)
-                u_next = uu - g / e.fu
-                newton_ok = lo < u_next < hi
-            end
-            newton_ok || (u_next = T(0.5) * (lo + hi))
-
-            du = u_next - uu
-            uu = u_next
-
-            u_scale = abs(uu) > one(T) ? abs(uu) : one(T)
-            if abs(du) <= tsolve_step_tol(T) * u_scale
-                converged = true
-                break
-            end
-        end
-        converged || (flags |= FLAG_MAXITER)
-        u = uu
+        # A secant estimate from the endpoints beats a plain midpoint start.
+        clamp(lo + (hi - lo) * (target - f_lo) / (f_hi - f_lo), lo, hi)
     end
 
-    # The extension flags describe where the solve *landed*, not where the
-    # input was: with the extensions in place the solve almost always finds a
-    # genuine root out there rather than pinning at the box edge, so these mark
-    # "the answer is in the designed extension zone" and not "the input was
-    # clamped".
+    f_scale = abs(target) > one(T) ? abs(target) : one(T)
+    iters = Int32(0)
+    converged = false
+    while iters < max_iter
+        iters += one(Int32)
+        e = extended_sample(fld, x, uu, y, spec)
+        g = e.f - target
+
+        # Maintain the bracket by sign; f increases with u.
+        g < zero(T) ? (lo = uu) : (hi = uu)
+
+        if abs(g) <= tsolve_residual_tol(T) * f_scale
+            # Take the Newton step the residual already pays for. For the
+            # entropy, the tolerance admits an error of 1e-12·|s|, which is a
+            # relative error in U some 20 times above con2prim's own
+            # tolerance; a warm start that already sits inside it would
+            # otherwise come back unchanged, so the solver's outer
+            # residual would depend on the warm start rather than on s
+            # alone. One step makes that error quadratic, and is free:
+            # both callers sample at the final u anyway.
+            if e.fu > zero(T)
+                u_pol = uu - g / e.fu
+                lo < u_pol < hi && (uu = u_pol)
+            end
+            converged = true
+            break
+        end
+
+        # Newton, accepted only if it stays inside the bracket and the
+        # slope is positive there; bisect otherwise.
+        u_next = zero(T)
+        newton_ok = false
+        if e.fu > zero(T)
+            u_next = uu - g / e.fu
+            newton_ok = lo < u_next < hi
+        end
+        newton_ok || (u_next = T(0.5) * (lo + hi))
+
+        du = u_next - uu
+        uu = u_next
+
+        u_scale = abs(uu) > one(T) ? abs(uu) : one(T)
+        if abs(du) <= tsolve_step_tol(T) * u_scale
+            converged = true
+            break
+        end
+    end
+    return uu, iters, converged, f_lo, f_hi
+end
+
+"""
+    landing_flags(v, u, flags, converged)
+
+Add to `flags` what the temperature solve's result says.
+
+The extension flags describe where the solve *landed*, not where the input was:
+with the extensions in place the solve almost always finds a genuine root out
+there rather than pinning at the box edge, so these mark "the answer is in the
+designed extension zone" and not "the input was clamped".
+"""
+@inline function landing_flags(v::EOSTableView{S}, u::T, flags::UInt32, converged::Bool) where {S,T}
+    converged || (flags |= FLAG_MAXITER)
     if u < v.u_lo
         flags |= FLAG_EXT_S_LOW
     elseif u > v.u_hi
         flags |= FLAG_EXT_S_HIGH
     end
+    return flags
+end
 
-    return eval_at(v, x_use, u, y, flags, iters)
+function evaluate_windowed(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where {S,T}
+    x_use, y, flags = locate(v, ρ★, yₑ)
+
+    # Solve σ_ext(x_use, u, y) = s for u on the extended bracket. Its ends are
+    # the extended entropy window at this point, which the caller gets for free.
+    u, iters, converged, σ_lo, σ_hi = solve_u(v.σ, σ_ext_spec(v), x_use, y, s, T(v.u_ext_lo), T(v.u_ext_hi), u_guess,
+                                              v.max_iter)
+    flags = landing_flags(v, u, flags, converged)
+    return eval_at(v, x_use, u, y, flags, iters), SRange{T}(σ_lo, σ_hi)
+end
+
+"""
+    entropy_from_energy(v::EOSTableView, ρ★, yₑ, U, u_guess, n_iter)
+
+The table inverts its energy field directly in log T and samples the entropy
+there: one temperature solve, where the generic method runs one per entropy
+step. `n_iter` does not apply; the solve is capped like `evaluate`'s.
+"""
+function entropy_from_energy(v::EOSTableView{S}, ρ★::T, yₑ::T, U::T, u_guess::T, n_iter::Integer) where {S,T}
+    x_use, y, flags = locate(v, ρ★, yₑ)
+    lo, hi = T(v.u_ext_lo), T(v.u_ext_hi)
+
+    # U = (1 + Û)/κ - 1 and Û + shift = 10^L/c², so a target in U is one in L.
+    # The causal cap on L's tail slope applies only above the seam and does not
+    # depend on u, so passing it everywhere solves exactly the field eval_at
+    # samples.
+    E_target = (T(v.κ) * (one(T) + U) - one(T) + T(v.shift_hat)) / T(v.inv_c²)
+    u, iters, converged = lo, Int32(0), true       # an energy below even the extended bracket
+    if E_target > zero(T)
+        L_spec = L_ext_spec(v, u_high_b_cap(v, x_use, y))
+        u, iters, converged, _, _ = solve_u(v.L, L_spec, x_use, y, safe_log10(E_target), lo, hi, u_guess, v.max_iter)
+    end
+    flags = landing_flags(v, u, flags, converged)
+
+    s = extended_sample(v.σ, x_use, u, y, σ_ext_spec(v)).f
+    return s, eval_at(v, x_use, u, y, flags, iters)
 end
 
 """

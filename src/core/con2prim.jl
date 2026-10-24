@@ -60,7 +60,7 @@ function Con2PrimOptions{T}(;
     w_max=12,
     τ_floor_rel=tau_floor_rel(T),
     bracket_scan=17,
-    seed_passes=3,
+    seed_passes=5,
     seed_s_iters=16,
 ) where {T<:AbstractFloat}
     return Con2PrimOptions{T}(
@@ -104,6 +104,8 @@ intermediate quantities the caller reuses.
 The two residuals are the momentum residual `f₁ = sinh(w) - cosh(w)·V`,
 deliberately not squared so the S → 0 root stays simple rather than double,
 and the normalized energy residual `f₂ = (τ_model - τ)/max(τ, τ_floor_rel·D)`.
+`sr_ext` is the extended entropy window at `ρ`, which the Newton clamps its step
+to.
 """
 struct Residuals{T<:Real}
     s::T
@@ -111,6 +113,7 @@ struct Residuals{T<:Real}
     ρ::T
     coshw::T
     pt::EOSPoint{T}
+    sr_ext::SRange{T}
     z::T
     v_par::T
     v_perp::T
@@ -130,6 +133,31 @@ struct BracketScanResult{T<:Real}
     s_hi::T
     s_best::T
 end
+
+"""
+    Con2PrimStage
+
+What [`con2prim_start`](@ref) hands to [`con2prim_finish`](@ref): an iterate as
+the `(s, w)` and the warm start `u` it was evaluated with, which reproduce it
+bit for bit, rather than the iterate itself, which is several times larger. It
+is the last Newton iterate if the Newton converged, and the best one otherwise.
+"""
+struct Con2PrimStage{T<:Real}
+    s::T
+    w::T
+    u::T
+    iters_newton::Int32
+    converged::Bool
+end
+
+"""
+    is_done(stage)
+
+Is the solve complete after its first stage, so that the output
+[`con2prim_start`](@ref) or [`con2prim_safe_start`](@ref) returned with it is
+the answer?
+"""
+@inline is_done(st::Con2PrimStage) = st.converged
 
 """A manufactured cold start: an exact seed derived without any prior iterate."""
 struct ColdSeed{T<:Real}
@@ -187,7 +215,7 @@ function residuals(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::
     half_sinh = sinh(T(0.5) * w)
 
     ρ = D / coshw
-    pt = evaluate(eos, ρ, s, yₑ, u_prev)
+    pt, sr_ext = evaluate_windowed(eos, ρ, s, yₑ, u_prev)
 
     h, U, p, cs² = pt.h, pt.U, pt.p, pt.cs²
     U_ρ, U_s, U_ρs = pt.U_ρ, pt.U_s, pt.U_ρs
@@ -235,7 +263,7 @@ function residuals(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::
             p_w * sinhw * sinhw + T(2) * p * sinhw * coshw + B² * VdV_dw - B² * v_par * dvpar_dw
     dτ_ds = ρ * U_s * coshw * coshw + p_s * sinhw * sinhw + B² * VdV_ds - B² * v_par * dvpar_ds
 
-    return Residuals{T}(s, w, ρ, coshw, pt, z, v_par, v_perp, V, f1, f2, df1_ds, df1_dw,
+    return Residuals{T}(s, w, ρ, coshw, pt, sr_ext, z, v_par, v_perp, V, f1, f2, df1_ds, df1_dw,
                         dτ_ds / denom, dτ_dw / denom)
 end
 
@@ -466,46 +494,6 @@ function bracket_scan(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_per
 end
 
 """
-    seed_s_solve(eos, ρ, yₑ, ε, u_prev, n_iter)
-
-Recover the entropy from an internal energy, returning `(s, point)`.
-
-This cannot fail: `U_s = T̂ > 0` everywhere, which is precisely what the tails'
-monotonicity guards buy, so the extended entropy window always brackets the
-root and the safeguarded Newton is globally convergent.
-"""
-function seed_s_solve(eos::AbstractEOS{S}, ρ::T, yₑ::T, ε::T, u_prev::T, n_iter::Integer) where {S,T}
-    ext = srange_extended(eos, ρ, yₑ)
-    lo, hi = ext.s_min, ext.s_max
-    # A degenerate bracket is never seen on a real table, but is guarded.
-    lo < hi || return lo, evaluate(eos, ρ, lo, yₑ, u_prev)
-
-    ε_scale = ε > tiny_denom(T) ? ε : tiny_denom(T)
-    s = T(0.5) * (lo + hi)
-    pt = evaluate(eos, ρ, s, yₑ, u_prev)
-
-    for _ in 1:n_iter
-        g = pt.U - ε
-        # U increases with s, so the sign says which way the root lies.
-        g < zero(T) ? (lo = s) : (hi = s)
-        abs(g) <= tsolve_residual_tol(T) * ε_scale && break
-
-        s_next = zero(T)
-        newton_ok = false
-        if pt.U_s > zero(T)
-            s_next = s - g / pt.U_s
-            newton_ok = isfinite(s_next) && lo < s_next < hi
-        end
-        newton_ok || (s_next = T(0.5) * (lo + hi))
-        (s_next == s || !(lo < hi)) && break
-
-        s = s_next
-        pt = evaluate(eos, ρ, s, yₑ, pt.u_solved)
-    end
-    return s, pt
-end
-
-"""
     seed_z_solve(D, E, p, S_perp, B², n_iter)
 
 Solve the energy relation for the total enthalpy density, given a lagged
@@ -617,7 +605,7 @@ function cold_seed(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::
              T(0.5) * B² * v_par * v_par) / ρW²
         ε > zero(T) || (ε = zero(T))     # also catches a non-finite quotient
 
-        s, pt = seed_s_solve(eos, ρ, yₑ, ε, u_prev, nsit)
+        s, pt = entropy_from_energy(eos, ρ, yₑ, ε, u_prev, nsit)
         u_prev = pt.u_solved
         out = ColdSeed{T}(s, w, pt.u_solved, ρ, z)
 
@@ -631,6 +619,13 @@ end
                           iters_fallback::Int32) where {T}
     return Con2PrimOut{T}(r.ρ, r.s, yₑ, r.w, cosh(r.w), r.v_par, r.v_perp, r.pt, result,
                           iters_newton, iters_fallback, r.pt.flags)
+end
+
+"""The placeholder output of a first stage that is not done: no EOS call, all NaN."""
+@inline function nan_c2p_out(::Type{T}) where {T}
+    n = T(NaN)
+    pt = EOSPoint{T}(n, n, n, n, n, n, n, n, n, n, n, n, Int32(0), UInt32(0))
+    return Con2PrimOut{T}(n, n, n, n, n, n, n, pt, C2PResult.failed_max_iter, Int32(0), Int32(0), UInt32(0))
 end
 
 """
@@ -652,9 +647,39 @@ is what raises the warm-start Newton success rate from 86% to 99%, and the
 fallback is the safety net for the remainder.
 
 A failure still returns a fully populated best-effort state.
+
+This is [`con2prim_start`](@ref) followed, where needed, by
+[`con2prim_finish`](@ref), and gives the same result bit for bit. On a GPU the
+two stages can run as separate kernels.
 """
 function con2prim(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T}, s_guess::T=T(NaN),
                   w_guess::T=T(NaN), u_guess::T=T(NaN)) where {S,T}
+    out, st = con2prim_start(eos, in, opts, s_guess, w_guess, u_guess)
+    is_done(st) && return out
+    return con2prim_finish(eos, in, opts, st)
+end
+
+"""
+    con2prim_start(eos, in, opts, s_guess = NaN, w_guess = NaN, u_guess = NaN) -> (out, stage)
+
+The first stage of [`con2prim`](@ref): the cold seed, if a guess is missing,
+and the Newton. If [`is_done`](@ref)`(stage)`, `out` is `con2prim`'s result;
+otherwise `out` is a placeholder of NaNs, and [`con2prim_finish`](@ref) on
+`stage` gives the result.
+
+On a GPU a warp runs as long as its slowest state, and the fallback costs many
+times a Newton solve, so a few states in it hold up most warps. Running the
+first stage over all states and the second over only those not done, as two
+kernels, keeps them apart:
+
+```julia
+out[i], st[i] = con2prim_start(eos, cin[i], opts)               # kernel 1, every i
+idx = findall(!is_done, st)                                      # compaction, on the device
+out[idx[j]] = con2prim_finish(eos, cin[idx[j]], opts, st[idx[j]])  # kernel 2, every j
+```
+"""
+function con2prim_start(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T}, s_guess::T=T(NaN),
+                        w_guess::T=T(NaN), u_guess::T=T(NaN)) where {S,T}
     yₑ = in.D_Y / in.D
 
     # The cold seed is computed only when a guess is missing, so a fully warm
@@ -688,7 +713,12 @@ function con2prim(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{
     # `best_norm` may start as NaN from a non-finite first residual; the update
     # is written as `!(n >= best_norm)` so that is replaced by the first finite
     # iterate rather than latching forever.
+    #
+    # Each iterate is remembered with the warm start it was evaluated with, so
+    # that con2prim_finish can rebuild it exactly.
+    u_last = u_start
     r_best = r
+    u_best = u_start
     best_norm = scaled_norm(r)
 
     while !converged && iters < opts.max_iter_newton
@@ -702,30 +732,53 @@ function con2prim(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{
         ds = (b * r.f2 - d * r.f1) / det
         dw = (c * r.f1 - a * r.f2) / det
 
-        sr_ext = srange_extended(eos, r.ρ, yₑ)
-        ds_max = T(0.25) * (sr_ext.s_max - sr_ext.s_min)
+        ds_max = T(0.25) * (r.sr_ext.s_max - r.sr_ext.s_min)
         ds = clamp(ds, -ds_max, ds_max)
         dw = clamp(dw, -one(T), one(T))
 
         w_raw = w + dw
         w_next = w_raw < zero(T) ? tiny_w(T) : clamp(w_raw, zero(T), opts.w_max)
         s_next = s + ds
-        r_next = residuals(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², s_next, w_next,
-                           r.pt.u_solved, opts.τ_floor_rel)
+        u_next = r.pt.u_solved
+        r_next = residuals(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², s_next, w_next, u_next,
+                           opts.τ_floor_rel)
 
         (isfinite(r_next.f1) && isfinite(r_next.f2)) || break
 
-        s, w, r = s_next, w_next, r_next
+        s, w, r, u_last = s_next, w_next, r_next, u_next
         converged = f1_converged(r, opts.tol) && abs(r.f2) <= opts.tol
 
         n_now = scaled_norm(r)
         if isfinite(n_now) && !(n_now >= best_norm)
             r_best = r
+            u_best = u_last
             best_norm = n_now
         end
     end
 
-    converged && return fill_out(r, yₑ, C2PResult.converged_newton, iters, Int32(0))
+    if converged
+        return fill_out(r, yₑ, C2PResult.converged_newton, iters, Int32(0)),
+               Con2PrimStage{T}(r.s, r.w, u_last, iters, true)
+    end
+    return nan_c2p_out(T), Con2PrimStage{T}(r_best.s, r_best.w, u_best, iters, false)
+end
+
+"""
+    con2prim_finish(eos, in, opts, stage) -> Con2PrimOut
+
+The second stage of [`con2prim`](@ref), for a `stage` from
+[`con2prim_start`](@ref): the nested one-dimensional fallback, started from the
+Newton's best iterate. For a stage that [`is_done`](@ref) it only rebuilds the
+converged result.
+"""
+function con2prim_finish(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T},
+                         st::Con2PrimStage{T}) where {S,T}
+    yₑ = in.D_Y / in.D
+    iters = st.iters_newton
+    # Evaluated as the first stage evaluated it, so this is its iterate, bit for bit.
+    r = residuals(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², st.s, st.w, st.u, opts.τ_floor_rel)
+    st.converged && return fill_out(r, yₑ, C2PResult.converged_newton, iters, Int32(0))
+    r_best = r
 
     # --- Nested one-dimensional fallback ---------------------------------
     s_anchor = r_best.s

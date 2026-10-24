@@ -233,6 +233,7 @@
         rng = StableRNG(23)
         nbad = 0
         nfalse = 0
+        nsplit = ndone = 0
         seen = UInt32(0)
         for _ in 1:3000
             c = valid_state(rng; w_max=6.0)
@@ -245,6 +246,10 @@
             cin = Con2PrimIn(fD * c.D, fτ * c.τ, fY * fD * c.D_Y, fS * c.S_par, fS * c.S_perp, c.B²)
             out = con2prim_safe(v, cin, opts, proj)
             seen |= out.policy_flags
+            # Finishing any first stage, done or not, gives the fused result.
+            first, st = con2prim_safe_start(v, cin, opts, proj)
+            nsplit += con2prim_safe_finish(v, cin, opts, proj, st) !== out || (is_done(st) && first !== out)
+            ndone += is_done(st)
             bad = violations(cin, out)
             isempty(bad) || (nbad += 1; nbad <= 5 && @info "violated" cin out.policy_flags bad)
             # check_con_state never reports a face con2prim_safe does not set.
@@ -253,6 +258,8 @@
         end
         @test nbad == 0
         @test nfalse == 0
+        @test nsplit == 0
+        @test 0 < ndone < 3000
         # Every face was exercised.
         for bit in (FLAG_POL_ρ_FLOORED, FLAG_POL_ρ_CEILED, FLAG_POL_YE_FLOORED, FLAG_POL_YE_CEILED,
                     FLAG_POL_S_FLOORED, FLAG_POL_S_CEILED, FLAG_POL_W_CEILED)
@@ -267,6 +274,9 @@
         @test fx.s == srange(v, fx.ρ, fx.ye).s_min
         for cin in (with(g; τ=NaN), with(g; S_par=Inf), with(g; D=NaN), with(g; D=-1.0), with(g; B²=-1.0))
             out = con2prim_safe(v, cin, opts, proj)
+            _, st = con2prim_safe_start(v, cin, opts, proj)
+            @test !is_done(st)
+            @test con2prim_safe_finish(v, cin, opts, proj, st) === out
             @test out.policy_flags == FLAG_POL_NONFINITE
             @test !out.solved            # no solve was attempted
             @test (out.base.ρ, out.base.s, out.base.ye, out.base.w) == (fx.ρ, fx.s, fx.ye, fx.w)
@@ -277,7 +287,9 @@
     @testset "NOT_CONVERGED" begin
         # A solver starved of iterations fails on a valid state; the diagnosis
         # then finds it inside the range, so there is nothing to project onto.
-        starved = Con2PrimOptions(; max_iter_newton=0, max_iter_1d=1)
+        # The seed is starved too: with all its passes, it alone solves these
+        # states to the tolerance.
+        starved = Con2PrimOptions(; max_iter_newton=0, max_iter_1d=1, seed_passes=1)
         rng = StableRNG(41)
         n = 0
         for _ in 1:50

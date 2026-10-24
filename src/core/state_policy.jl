@@ -406,6 +406,34 @@ struct FaceTry{T<:Real}
     cond::Int8
 end
 
+# Which branch of `con2prim_safe` the first stage took.
+const SAFE_NONFINITE = UInt8(0)   # no solve: the input is not a state
+const SAFE_ρ_FLOOR = UInt8(1)     # D below ρ_min: put at rest at ρ_min
+const SAFE_ρ_CEIL = UInt8(2)      # D above ρ_max·cosh(w_cap): on ρ_max
+const SAFE_ORDINARY = UInt8(3)    # solved, then diagnosed if not inside
+
+"""
+    Con2PrimSafeStage
+
+What [`con2prim_safe_start`](@ref) hands to [`con2prim_safe_finish`](@ref): the
+solver's stage, the clamped Yₑ and its flags, and the branch taken.
+"""
+struct Con2PrimSafeStage{T<:Real}
+    c2p::Con2PrimStage{T}
+    yₑ::T
+    flags::UInt32
+    branch::UInt8
+    done::Bool
+end
+
+@inline is_done(st::Con2PrimSafeStage) = st.done
+
+"""The placeholder output of a first stage that is not done: no EOS call, all NaN."""
+@inline function nan_safe_out(::Type{T}) where {T}
+    n = T(NaN)
+    return Con2PrimSafeOut{T}(nan_c2p_out(T), Prim2ConOut{T}(n, n, n, n, n, n), UInt32(0), false)
+end
+
 """
     con2prim_safe(eos, in, opts, proj, s_guess = NaN, w_guess = NaN, u_guess = NaN)
 
@@ -436,10 +464,80 @@ is expected to replace it.
 
 This level has no notion of an atmosphere or of collapse; that is
 [`apply_policy`](@ref)'s.
+
+This is [`con2prim_safe_start`](@ref) followed, where needed, by
+[`con2prim_safe_finish`](@ref), and gives the same result bit for bit. On a
+GPU the two stages can run as separate kernels.
 """
 function con2prim_safe(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T},
                        proj::ProjectionOptions{T}, s_guess::T=T(NaN), w_guess::T=T(NaN),
                        u_guess::T=T(NaN)) where {S,T}
+    out, st = con2prim_safe_start(eos, in, opts, proj, s_guess, w_guess, u_guess)
+    is_done(st) && return out
+    return con2prim_safe_finish(eos, in, opts, proj, st)
+end
+
+"""
+    con2prim_safe_start(eos, in, opts, proj, s_guess = NaN, w_guess = NaN, u_guess = NaN) -> (out, stage)
+
+The first stage of [`con2prim_safe`](@ref): [`con2prim_start`](@ref) on the
+input with Yₑ clamped. It is done when the Newton converged on a state inside
+every face, the common case, and then `out` is `con2prim_safe`'s result.
+Otherwise `out` is a placeholder of NaNs, and [`con2prim_safe_finish`](@ref)
+on `stage` gives the result: the fallback, the diagnosis and the face solves,
+and the inputs no solve applies to. Run as two kernels the same way as
+[`con2prim_start`](@ref).
+"""
+function con2prim_safe_start(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T},
+                             proj::ProjectionOptions{T}, s_guess::T=T(NaN), w_guess::T=T(NaN),
+                             u_guess::T=T(NaN)) where {S,T}
+    ρ_min = proj_ρ_min(eos, proj)
+    ρ_max = proj_ρ_max(eos, proj)
+    w_cap = proj_w_cap(proj)
+    δ = face_slack(T)
+    D, τ, S_par, S_perp = in.D, in.τ, in.S_par, in.S_perp
+    B² = (isfinite(in.B²) && in.B² > zero(T)) ? in.B² : zero(T)
+    n = T(NaN)
+    none = Con2PrimStage{T}(n, n, n, Int32(0), false)
+
+    if !(con_finite(in) && D > zero(T) && in.B² >= zero(T))
+        return nan_safe_out(T), Con2PrimSafeStage{T}(none, n, FLAG_POL_NONFINITE, SAFE_NONFINITE, false)
+    end
+
+    # 1. Yₑ decouples from the rest, and is clamped first.
+    yₑ, flags = clamp_yₑ(eos, in.D_Y / D)
+
+    # 2. Faces decided by D alone, before any solve. Below ρ_min every rapidity
+    #    gives ρ < ρ_min, so the state is put at rest at ρ_min, the least mass
+    #    added; above ρ_max·cosh(w_cap) none gives ρ ≤ ρ_max.
+    if D < ρ_min * (one(T) - δ)
+        return nan_safe_out(T), Con2PrimSafeStage{T}(none, yₑ, flags, SAFE_ρ_FLOOR, false)
+    elseif D > ρ_max * cosh(w_cap) * (one(T) + δ)
+        return nan_safe_out(T), Con2PrimSafeStage{T}(none, yₑ, flags, SAFE_ρ_CEIL, false)
+    end
+
+    # 3. The ordinary path. Only a state inside every face is taken from the
+    #    solve; anything else is decided by the diagnosis in the second stage,
+    #    so that a converged and a failed solve of neighbouring states project
+    #    alike.
+    D_Y = flags == 0 ? in.D_Y : yₑ * D
+    base, c = con2prim_start(eos, Con2PrimIn{T}(D, τ, D_Y, S_par, S_perp, B²), opts, s_guess, w_guess, u_guess)
+    if is_done(c) && inside_faces(eos, base.ρ, base.s, yₑ, base.w, ρ_min, ρ_max, w_cap)
+        # The input's own B², so that a -0.0 also comes back bit for bit.
+        return Con2PrimSafeOut{T}(base, Prim2ConOut{T}(D, τ, D_Y, S_par, S_perp, in.B²), flags, true),
+               Con2PrimSafeStage{T}(c, yₑ, flags, SAFE_ORDINARY, true)
+    end
+    return nan_safe_out(T), Con2PrimSafeStage{T}(c, yₑ, flags, SAFE_ORDINARY, false)
+end
+
+"""
+    con2prim_safe_finish(eos, in, opts, proj, stage) -> Con2PrimSafeOut
+
+The second stage of [`con2prim_safe`](@ref), for a `stage` from
+[`con2prim_safe_start`](@ref).
+"""
+function con2prim_safe_finish(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOptions{T},
+                              proj::ProjectionOptions{T}, st::Con2PrimSafeStage{T}) where {S,T}
     # Every solver below has exactly one call site, and the result is packaged
     # at one: a GPU compiler inlines every call, and each copy carries whole EOS
     # evaluations. The decision is therefore made first, as at most two "tries"
@@ -449,82 +547,68 @@ function con2prim_safe(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOpt
     ρ_min = proj_ρ_min(eos, proj)
     ρ_max = proj_ρ_max(eos, proj)
     w_cap = proj_w_cap(proj)
-    δ = face_slack(T)
     tol = opts.tol
     D, τ, S_par, S_perp = in.D, in.τ, in.S_par, in.S_perp
     B² = (isfinite(in.B²) && in.B² > zero(T)) ? in.B² : zero(T)
 
-    yₑ = T(NaN)
-    flags = UInt32(0)
+    yₑ = st.yₑ
+    flags = st.flags
     u = T(NaN)
     e = nan_edge_ends(T)
     ntry = 0
     try1 = try2 = FaceTry{T}(false, false, zero(T), zero(T), false, UInt32(0), TRY_ALWAYS)
 
-    if !(con_finite(in) && D > zero(T) && in.B² >= zero(T))
-        flags = FLAG_POL_NONFINITE
-    else
-        # 1. Yₑ decouples from the rest, and is clamped first.
-        yₑ, flags = clamp_yₑ(eos, in.D_Y / D)
+    if st.branch == SAFE_ρ_FLOOR
+        ntry = 1
+        try1 = FaceTry{T}(false, false, ρ_min, zero(T), false, FLAG_POL_ρ_FLOORED, TRY_ALWAYS)
+    elseif st.branch == SAFE_ρ_CEIL
+        ntry = 1
+        try1 = FaceTry{T}(false, false, ρ_max, zero(T), true, FLAG_POL_ρ_CEILED, TRY_ALWAYS)
+    elseif st.branch == SAFE_ORDINARY
+        D_Y = flags == 0 ? in.D_Y : yₑ * D
+        base = con2prim_finish(eos, Con2PrimIn{T}(D, τ, D_Y, S_par, S_perp, B²), opts, st.c2p)
+        res, it_n, it_f, solved = base.result, base.iters_newton, base.iters_fallback, true
+        converged = res === C2PResult.converged_newton || res === C2PResult.converged_fallback
+        # The fallback may have converged on a state inside every face.
+        if converged && inside_faces(eos, base.ρ, base.s, yₑ, base.w, ρ_min, ρ_max, w_cap)
+            # The input's own B², so that a -0.0 also comes back bit for bit.
+            return Con2PrimSafeOut{T}(base, Prim2ConOut{T}(D, τ, D_Y, S_par, S_perp, in.B²), flags, true)
+        end
 
-        # 2. Faces decided by D alone, before any solve. Below ρ_min every
-        #    rapidity gives ρ < ρ_min, so the state is put at rest at ρ_min, the
-        #    least mass added; above ρ_max·cosh(w_cap) none gives ρ ≤ ρ_max.
-        if D < ρ_min * (one(T) - δ)
-            ntry = 1
-            try1 = FaceTry{T}(false, false, ρ_min, zero(T), false, FLAG_POL_ρ_FLOORED, TRY_ALWAYS)
-        elseif D > ρ_max * cosh(w_cap) * (one(T) + δ)
-            ntry = 1
-            try1 = FaceTry{T}(false, false, ρ_max, zero(T), true, FLAG_POL_ρ_CEILED, TRY_ALWAYS)
+        # 4. The diagnosis, on the rapidities at which keeping D leaves ρ
+        #    and w in range. Along an entropy edge the state that keeps D and
+        #    S is a root of φ; G = f₂ along the solve's curve rises with s,
+        #    so the cold end of the valid part of that curve decides "too
+        #    cold", the hot end "too hot".
+        u = base.eos.u_solved
+        w_lo, w_hi, hi_is_cap = valid_w_interval(D, ρ_min, ρ_max, w_cap)
+        hi_flag = hi_is_cap ? FLAG_POL_W_CEILED : FLAG_POL_ρ_FLOORED
+        ρ_hi = hi_is_cap ? D / cosh(w_cap) : ρ_min
+        on_ρmax = FaceTry{T}(false, false, ρ_max, zero(T), true, FLAG_POL_ρ_CEILED, TRY_ALWAYS)
+        on_w_hi = FaceTry{T}(false, false, ρ_hi, w_hi, false, hi_flag, TRY_ALWAYS)
+        e = edge_ends(eos, D, τ, yₑ, S_par, S_perp, B², zero(T), w_lo, w_hi, u, opts)
+        ntry = 1
+        if edge_φ(e.min_lo) > zero(T)
+            # 4.1 The s_min edge's root lies above ρ_max: every state
+            #     keeping D and S is too cold or too dense, and D has to give.
+            try1 = on_ρmax
+        elseif edge_φ(e.max_hi) < zero(T)
+            # 4.2 The s_max edge's root lies beyond w_hi: every state
+            #     keeping D and S is too hot or too fast, and S has to give.
+            try1 = on_w_hi
         else
-            # 3. The ordinary path. Only a state inside every face is taken from
-            #    the solve; anything else is decided by the diagnosis below, so
-            #    that a converged and a failed solve of neighbouring states
-            #    project alike.
-            D_Y = flags == 0 ? in.D_Y : yₑ * D
-            base = con2prim(eos, Con2PrimIn{T}(D, τ, D_Y, S_par, S_perp, B²), opts, s_guess, w_guess, u_guess)
-            res, it_n, it_f, solved = base.result, base.iters_newton, base.iters_fallback, true
-            converged = res === C2PResult.converged_newton || res === C2PResult.converged_fallback
-            if converged && inside_faces(eos, base.ρ, base.s, yₑ, base.w, ρ_min, ρ_max, w_cap)
-                # The input's own B², so that a -0.0 also comes back bit for bit.
-                return Con2PrimSafeOut{T}(base, Prim2ConOut{T}(D, τ, D_Y, S_par, S_perp, in.B²), flags, true)
-            end
-
-            # 4. The diagnosis, on the rapidities at which keeping D leaves ρ
-            #    and w in range. Along an entropy edge the state that keeps D and
-            #    S is a root of φ; G = f₂ along the solve's curve rises with s,
-            #    so the cold end of the valid part of that curve decides "too
-            #    cold", the hot end "too hot".
-            u = base.eos.u_solved
-            w_lo, w_hi, hi_is_cap = valid_w_interval(D, ρ_min, ρ_max, w_cap)
-            hi_flag = hi_is_cap ? FLAG_POL_W_CEILED : FLAG_POL_ρ_FLOORED
-            ρ_hi = hi_is_cap ? D / cosh(w_cap) : ρ_min
-            on_ρmax = FaceTry{T}(false, false, ρ_max, zero(T), true, FLAG_POL_ρ_CEILED, TRY_ALWAYS)
-            on_w_hi = FaceTry{T}(false, false, ρ_hi, w_hi, false, hi_flag, TRY_ALWAYS)
-            e = edge_ends(eos, D, τ, yₑ, S_par, S_perp, B², zero(T), w_lo, w_hi, u, opts)
-            ntry = 1
-            if edge_φ(e.min_lo) > zero(T)
-                # 4.1 The s_min edge's root lies above ρ_max: every state
-                #     keeping D and S is too cold or too dense, and D has to give.
-                try1 = on_ρmax
-            elseif edge_φ(e.max_hi) < zero(T)
-                # 4.2 The s_max edge's root lies beyond w_hi: every state
-                #     keeping D and S is too hot or too fast, and S has to give.
-                try1 = on_w_hi
-            else
-                # 4.3 Too cold at the cold end: on the s_min edge if its root is
-                #     in range, else at w_hi if the state there carries less
-                #     momentum than the input. 4.4 Too hot at the hot end: on the
-                #     s_max edge if its root is in range, else at ρ_max if that
-                #     removes mass.
-                ntry = 2
-                try1 = edge_φ(e.min_hi) >= zero(T) ?
-                       FaceTry{T}(true, false, zero(T), zero(T), false, FLAG_POL_S_FLOORED, TRY_COLD) :
-                       FaceTry{T}(false, false, ρ_hi, w_hi, false, hi_flag, TRY_S_LOWERED)
-                try2 = edge_φ(e.max_lo) <= zero(T) ?
-                       FaceTry{T}(true, true, zero(T), zero(T), false, FLAG_POL_S_CEILED, TRY_HOT) :
-                       FaceTry{T}(false, false, ρ_max, zero(T), true, FLAG_POL_ρ_CEILED, TRY_D_LOWERED)
-            end
+            # 4.3 Too cold at the cold end: on the s_min edge if its root is
+            #     in range, else at w_hi if the state there carries less
+            #     momentum than the input. 4.4 Too hot at the hot end: on the
+            #     s_max edge if its root is in range, else at ρ_max if that
+            #     removes mass.
+            ntry = 2
+            try1 = edge_φ(e.min_hi) >= zero(T) ?
+                   FaceTry{T}(true, false, zero(T), zero(T), false, FLAG_POL_S_FLOORED, TRY_COLD) :
+                   FaceTry{T}(false, false, ρ_hi, w_hi, false, hi_flag, TRY_S_LOWERED)
+            try2 = edge_φ(e.max_lo) <= zero(T) ?
+                   FaceTry{T}(true, true, zero(T), zero(T), false, FLAG_POL_S_CEILED, TRY_HOT) :
+                   FaceTry{T}(false, false, ρ_max, zero(T), true, FLAG_POL_ρ_CEILED, TRY_D_LOWERED)
         end
     end
 

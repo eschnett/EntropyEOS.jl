@@ -86,6 +86,8 @@ export
     Prim2ConOut, Con2PrimIn, Con2PrimOptions, Con2PrimOut, prim2con, con2prim,
     ProjectionOptions, PolicyOptions, PrimState, Con2PrimSafeOut,
     default_projection, con2prim_safe, apply_policy,
+    Con2PrimStage, Con2PrimSafeStage, is_done, con2prim_start, con2prim_finish,
+    con2prim_safe_start, con2prim_safe_finish,
     check_prim_state, project_prim_state, check_con_state,
     # Tables
     RawTable, validate_axes, add_field!, has_field, field, field_names,

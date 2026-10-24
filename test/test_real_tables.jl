@@ -96,7 +96,7 @@ else
                 opts = Con2PrimOptions()
                 rng = StableRNG(987654)
                 n = 5000
-                nwarm_fail = ncold_fail = 0
+                nwarm_fail = ncold_fail = nsplit = 0
                 errs = Float64[]
                 for k in 1:n
                     st = _sample_real_state(v, rng)
@@ -113,6 +113,8 @@ else
                         oc = con2prim(v, cin, opts)
                         (oc.result === E.C2PResult.converged_newton ||
                          oc.result === E.C2PResult.converged_fallback) || (ncold_fail += 1)
+                        # The second stage rebuilds the first's iterate exactly.
+                        nsplit += con2prim_finish(v, cin, opts, con2prim_start(v, cin, opts)[2]) !== oc
                     end
                 end
                 sort!(errs)
@@ -126,6 +128,7 @@ else
                 # own worst warm density error is 1.6, larger than this port's).
                 @test nwarm_fail <= 5
                 @test ncold_fail <= 5
+                @test nsplit == 0
                 @test p(0.5) < 1e-11
                 @test p(0.99) < 1e-7
                 @test p(0.999) < 1e-6

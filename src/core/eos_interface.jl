@@ -2,9 +2,9 @@
 # equation of state, and the two result types every EOS hands back.
 #
 # The solvers were written against the table, but they only ever touch it
-# through `evaluate`, `srange`, `srange_extended` and the box bounds. Naming
-# that surface lets an analytic EOS use the same solver and the same
-# never-fails policy.
+# through `evaluate`, `srange`, `srange_extended` and the box bounds, plus two
+# optional methods whose defaults are built from those. Naming that surface lets
+# an analytic EOS use the same solver and the same never-fails policy.
 
 """
     AbstractEOS{T}
@@ -27,6 +27,14 @@ provide, allocation-free and without ever throwing:
   * `logρ_bounds(eos) -> (x_lo, x_hi)`: the physical box in `log10(ρ★)`.
   * `yₑ_bounds(eos) -> (y_lo, y_hi)`: the physical box in `Yₑ`.
   * `EntropyEOS.κ(eos)`: the baryon-mass rescaling, `ρ★ = κρ`.
+
+Two further methods are optional, with defaults built on the ones above; an EOS
+overrides them only when it can do the same work more cheaply:
+
+  * [`EntropyEOS.evaluate_windowed`](@ref): `evaluate` and `srange_extended`
+    at the same point.
+  * [`EntropyEOS.entropy_from_energy`](@ref): the entropy at which `U` takes a
+    given value.
 
 Every returned `EOSPoint` must satisfy the thermodynamic identities
 `p = ρ²U_ρ`, `h = 1 + U + p/ρ`, `cs² = (2ρU_ρ + ρ²U_ρρ)/h` and `T̂ = U_s`, with
@@ -120,3 +128,63 @@ end
 # can evaluate a Float32 table, and a Dual caller a Float64 one.
 evaluate(eos::AbstractEOS{S}, ρ★, s, yₑ, u_guess) where {S} =
     evaluate(eos, promote(float(ρ★), float(s), float(yₑ), float(u_guess))...)
+
+# ---------------------------------------------------------------------------
+# Optional methods
+# ---------------------------------------------------------------------------
+
+"""
+    evaluate_windowed(eos, ρ★, s, yₑ, u_guess) -> (EOSPoint, SRange)
+
+`evaluate(eos, ρ★, s, yₑ, u_guess)` and `srange_extended(eos, ρ★, yₑ)`
+together. The con2prim Newton clamps every step to the extended window at the
+current density, and the table's `evaluate` has already sampled that window to
+bracket its temperature solve, so the table returns it rather than sampling it
+twice.
+"""
+@inline evaluate_windowed(eos::AbstractEOS{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where {S,T} =
+    evaluate(eos, ρ★, s, yₑ, u_guess), srange_extended(eos, ρ★, yₑ)
+
+"""
+    entropy_from_energy(eos, ρ★, yₑ, U, u_guess, n_iter) -> (s, EOSPoint)
+
+The entropy at which the specific internal energy is `U`, and the EOS there.
+The cold seed calls it once per pass.
+
+This default cannot fail: `U_s = T̂ > 0` everywhere, which is precisely what the
+tails' monotonicity guards buy, so the extended entropy window always brackets
+the root and the safeguarded Newton, at most `n_iter` steps, is globally
+convergent. Each step is a full `evaluate`, and so a temperature solve of its
+own; an EOS that can invert its energy directly should override this, and
+`n_iter` then need not apply.
+"""
+function entropy_from_energy(eos::AbstractEOS{S}, ρ★::T, yₑ::T, U::T, u_guess::T, n_iter::Integer) where {S,T}
+    ext = srange_extended(eos, ρ★, yₑ)
+    lo, hi = ext.s_min, ext.s_max
+    # A degenerate bracket is never seen on a real table, but is guarded.
+    lo < hi || return lo, evaluate(eos, ρ★, lo, yₑ, u_guess)
+
+    U_scale = U > tiny_denom(T) ? U : tiny_denom(T)
+    s = T(0.5) * (lo + hi)
+    pt = evaluate(eos, ρ★, s, yₑ, u_guess)
+
+    for _ in 1:n_iter
+        g = pt.U - U
+        # U increases with s, so the sign says which way the root lies.
+        g < zero(T) ? (lo = s) : (hi = s)
+        abs(g) <= tsolve_residual_tol(T) * U_scale && break
+
+        s_next = zero(T)
+        newton_ok = false
+        if pt.U_s > zero(T)
+            s_next = s - g / pt.U_s
+            newton_ok = isfinite(s_next) && lo < s_next < hi
+        end
+        newton_ok || (s_next = T(0.5) * (lo + hi))
+        (s_next == s || !(lo < hi)) && break
+
+        s = s_next
+        pt = evaluate(eos, ρ★, s, yₑ, pt.u_solved)
+    end
+    return s, pt
+end

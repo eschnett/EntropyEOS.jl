@@ -9,6 +9,7 @@ recorded each item in the documentation.
 - [State policy](#state-policy)
 - [Discipline in `core/`](#discipline-in-core)
   - [The one stack buffer](#the-one-stack-buffer)
+  - [Two stages](#two-stages)
 - [Deliberate deviations from the C++](#deliberate-deviations-from-the-c)
 - [Testing](#testing)
   - [Static analysis](#static-analysis)
@@ -20,6 +21,15 @@ recorded each item in the documentation.
 
 2026-09-24. Introducing `AbstractEOS` changed no arithmetic: a hash over 3,000
 states of every entry point's output was bitwise unchanged.
+
+2026-10-23. Added the optional `evaluate_windowed`. Every con2prim Newton step
+called `srange_extended` at the density `evaluate` had just used, and on the
+table that repeated the two samples bracketing its temperature solve: 2 of
+about 8 spline evaluations per step. `Residuals` now carries the window. Cold,
+warm and `con2prim_safe` outputs were bitwise unchanged on 32,768 states in
+each of 18 cases (six tables; s or log T uniform at Float64, s uniform at
+Float32). Warm calls with a 1e-3-perturbed guess got about 10% faster on the
+host, single-threaded; single cases scatter from 0 to 28%.
 
 ## State policy
 
@@ -237,6 +247,52 @@ level 2 keeping level 1's bits.
 2026-09-23. The `MVector{33,T}` buffer in `bracket_scan` was the design's
 biggest open risk; it is resolved by the kernel compiling and running on Metal.
 
+### Two stages
+
+2026-10-23. Split `con2prim` and `con2prim_safe` each into a first and a
+second stage, so that a GPU caller can run the fallback as a second kernel over
+only the states that need it. Before the direct cold seed, a host model from
+per-state spline counts on LS220 put the cost of warp divergence at 4.4 times
+the work, and at 2.4 times with the fallback split off; after it the seed was
+no longer what warps waited for, so the device gained 1.4–1.6 times where the
+host gained 2.6.
+
+The fused functions are now the two stages in sequence. Their outputs were
+bitwise unchanged on the 18 cases of 32,768 states used for the seed. The
+second stage rebuilds the first's iterate from `(s, w, u)`; the test suite
+asserts that finishing any first stage, done or not, gives the fused result
+bit for bit, on the synthetic table with starved options and on the real
+tables' cold states. Storing the iterate itself was rejected: `Residuals` is
+~280 bytes per state against 32, and rebuilding it costs one evaluation on a
+pending state, against a fallback's hundreds.
+
+Measured on an H200 by `study/device_parity.jl`, 2²⁰ states per table, the
+fused and the two-kernel form in the same run (a repeat of LS220 and SRO LS220
+reproduced every rate to 5%). Millions of states per second, and the number of
+states the second stage ran on:
+
+| Float64 | cold, fused | cold, 2 kernels | second stage | `con2prim_safe`, fused | 2 kernels | second stage |
+| --- | --- | --- | --- | --- | --- | --- |
+| synthetic | 64.2 | 67.6 | 0 | 14.7 | 41.9 | 122,170 |
+| LS220 | 1.5 | 3.8–4.0 | 23,115 | 1.3 | 2.5 | 142,169 |
+| SRO LS220 | 2.3 | 5.1 | 24,751 | 1.8 | 3.7 | 143,644 |
+| DD2 | 1.8 | 4.8 | 34,648 | 1.5 | 3.1 | 150,458 |
+| SFHo | 1.4 | 2.1 | 5,886 | 1.3 | 1.9 | 127,637 |
+
+At Float32 cold went from 5.5 to 13.1 on LS220, 9.1 to 16.8 on SRO LS220, 8.3
+to 15.7 on DD2 and 14.5 to 21.1 on SFHo. The compaction (`findall` on the
+device) took 0.1–0.3 ms, against 80–160 ms for the first stage. On the device
+the two-kernel results were bitwise those of the fused kernel for every state
+of every table at both precisions, and every gate the fused kernel passed, it
+passed too. Against the commit before the direct cold seed, run in the same
+job, cold Float64 `con2prim` on LS220 went from 1.1 to 4.0.
+
+What remains is the second stage itself. On SFHo its 5,886 states, 0.6%, of
+which 1,853 end in failure, took 410 ms against the first stage's 82. In
+`con2prim_safe` the second stage also carries every state outside a face,
+12–14% of this sampling: w is uniform in [0, 6), and 11.7% of it lies above
+the default cap acosh(100) ≈ 5.30.
+
 ## Deliberate deviations from the C++
 
 2026-10-23. Fixed cold `con2prim` failing on states on an edge of the entropy
@@ -298,6 +354,117 @@ Rejected: tightening `tsolve_residual_tol` instead, which buys the same
 accuracy with extra T-solve iterations on every hot-path `evaluate`, where the
 final step costs none; and removing the duplicate candidates at emission, which
 changes the scan's measured sampling where skipping empty pairs does not.
+
+2026-10-23. The cold seed solves for log T directly, and makes 5 passes rather
+than 3. On an H200, cold `con2prim` ran at 1.1 million states per second
+against 324 warm ([Precision and GPUs](docs/src/precision.md#throughput)).
+Counting spline evaluations on the host, on LS220 with the device-parity
+sampling, a cold state that Newton solves cost 230 of them, and 185 of those
+were the seed: three passes of a Newton in s, each step a full `evaluate` with
+its own temperature solve. `entropy_from_energy` on the table instead solves
+the energy field for log T, which is monotone for the same reason σ is, and
+samples σ once at the root.
+
+With three passes the direct seed made cold solves half as expensive, but on
+LS220 (65,536 states) it sent 1,709 states past Newton where the nested seed
+sent 1,531, took 5.31 Newton steps on average against 4.89, and its density
+round trip's p99 was 9.7e-9 against 3.5e-9. For energies inside the table
+the two solve U(s) = ε equally well, to about 1e-14; where their seeds part was
+not established. With five passes: 1,498, 4.04 and 2.0e-9, still at less than half the cost. More
+iterations of the nested seed (40 rather than 16) changed nothing.
+
+Measured on the host against the previous commit, 32,768 states per table,
+single-threaded, Float64. "s" samples the entropy uniformly in the physical
+window (2% margins), "log T" the temperature; w is uniform in [0, 6) and half
+the states are magnetized. Fallbacks count states that Newton did not solve and
+the fallback did:
+
+| cold, s / log T | µs per state | failed | fallbacks | Newton steps |
+| --- | --- | --- | --- | --- |
+| synthetic | 11.3→4.4 / 10.9→4.3 | 0→0 / 0→0 | 0→0 / 0→0 | 1.28→0.46 / 1.28→0.46 |
+| LS220 | 22.3→9.5 / 51.7→14.5 | 720→679 / 1222→1224 | 42→36 / 712→456 | 4.89→3.74 / 5.26→3.10 |
+| SRO LS220 | 23.7→9.0 / 59.5→15.8 | 797→754 / 1457→1472 | 17→11 / 881→563 | 4.93→3.78 / 6.33→3.18 |
+| DD2 | 23.0→11.1 / 49.3→13.0 | 7→5 / 3→2 | 1286→1066 / 2333→2123 | 5.78→4.41 / 5.34→3.52 |
+| DD2 repaired | 22.3→10.8 / 52.8→12.4 | 7→5 / 1→2 | 1308→1072 / 2330→2130 | 5.78→4.41 / 5.34→3.52 |
+| SFHo | 22.4→9.1 / 51.9→14.3 | 65→66 / 250→237 | 227→137 / 710→507 | 4.73→3.40 / 4.10→2.20 |
+
+At Float32 (s sampling) cold solves went from 15–18 µs to 4–6 µs, with
+failures 0–378 per table moving by at most 35, all but one of them down.
+`con2prim_safe` got 1.8–3.1 times faster and left the same states unsolved, with no
+non-finite output. Warm solves are bitwise unchanged, since the seed runs only
+without a guess.
+
+The density round trip's p99 got worse on no real table and improved on most,
+by up to a factor of 6.7 (LS220, log T: 1.2e-8 to 1.8e-9); its median grew by
+up to a factor of 1.4 (LS220, s: 1.7e-13 to 2.4e-13). On
+the synthetic table its tail grew: p99 7.3e-11 to 1.7e-10, maximum 1.5e-9 to
+7.2e-9. There most seeds already meet the tolerance, and 0.46 Newton steps are
+taken on average rather than 1.28. Forcing one Newton step after every seed
+left those quantiles exactly where they were, so they are where the
+tolerance's admissible set lands on ill-conditioned states, not unfinished
+iterations; the forced step was not kept.
+
+The analytic EOSs keep the nested seed. Five passes make their cold solves
+17% (ideal gas) and 45% (hybrid SLy) more expensive, take fewer Newton steps,
+and on the hybrid send 41 rather than 53 of 20,000 states to the fallback.
+
+`test_state_policy.jl`'s `NOT_CONVERGED` test starved the solver with no Newton
+steps, and with five direct passes the seed alone solved every state it drew.
+It now also limits the seed to one pass.
+
+The two studies that re-solve states cold were rerun, on the previous commit
+and on this one. `study/cold_failures.jl`, 20,000 valid states per table: cold
+failures went from 8, 16, 10 and 3 (LS220, SRO LS220, DD2 either version, SFHo)
+to 4, 9, 10 and 7, all still in the acausal regions (a) and (b) of
+[CODE.md](CODE.md#where-the-answer-is-not-unique); `con2prim_safe` had
+projected 33 of the 37 onto a face and returned 4 as `NOT_CONVERGED`, and now
+projects 22 of 30 and returns 8. `study/cold_resolve.jl`, 5,000 pushed-off
+states per table, reproduced the table in [CODE.md](CODE.md#the-contract)
+exactly before the change; after it, states re-flagged cold fell on every real
+table (LS220 146 to 140, SRO LS220 163 to 148, DD2 137 to 134, SFHo 68 to 63,
+DD2 repaired unchanged at 135), and so did the counts above the old slack. The
+superseded rows:
+
+| table | excess p99 | max | > 4·tol (old slack) | > 10⁻⁷ | re-flagged cold |
+| --- | --- | --- | --- | --- | --- |
+| synthetic | 6·10⁻⁹ | 6·10⁻⁷ | 930 of 4,638 | 1 | 1 |
+| LS220 | 5·10⁻⁹ | 2·10⁻⁵ | 360 of 3,899 | 29 | 146 |
+| SRO LS220 | 2·10⁻⁷ | 10⁻³ | 396 of 3,896 | 42 | 163 |
+| DD2 | 4·10⁻³ | 0.8 | 513 of 4,066 | 128 | 137 |
+| DD2 repaired | 4·10⁻³ | 0.8 | 570 of 4,067 | 127 | 135 |
+| SFHo | 4·10⁻⁹ | 0.7 | 477 of 3,995 | 31 | 68 |
+
+On the H200, with `study/device_parity.jl` (2²⁰ states per table), the previous
+commit and this one ran in the same job on the same GPU. Every Float64 and
+mixed gate passed for both; at Float32 both failed the same gates, the ones
+the [precision page](docs/src/precision.md#float32-on-a-gpu) reports. Warm
+throughput was unchanged, since there the warm start is the exact answer and no
+Newton step is taken. States the host solved cold and the device did not fell
+on every real table (LS220 84 to 60, SFHo 207 to 135, DD2 20 to 3). Cold
+throughput, millions of states per second:
+
+| cold `con2prim`, H200 | Float64 | Float32 | mixed |
+| --- | --- | --- | --- |
+| synthetic | 16.3→67.3 | 18.1→56.0 | |
+| LS220 | 1.1→1.5 | 4.1→5.8 | 0.9→1.2 |
+| SRO LS220 | 1.6→2.5 | 5.4→9.9 | 1.4→2.3 |
+| DD2 | 1.3→1.9 | 4.9→9.1 | |
+| SFHo | 1.0→1.4 | 7.8→15.3 | |
+
+DD2 repaired matched DD2. In the same job the host, on eight threads, got 2.6
+times faster on LS220. On the device the synthetic table gained 4.1 times, but
+the real tables only 1.4–1.6 at Float64 and 1.4–2.0 at Float32. There about 2%
+of cold states take the fallback or fail, about half the warps contain one,
+and the warp waits for it: the seed was most of the work per state but not of
+the work per warp.
+
+The throughput table it superseded, H200, LS220, millions of states per second:
+
+| | evaluate | con2prim cold | con2prim warm |
+| --- | --- | --- | --- |
+| Float64 | 318 | 1.1 | 324 |
+| mixed | 370 | 0.9 | 335 |
+| Float32 | 411 | 4.0 | 841 |
 
 ## Testing
 

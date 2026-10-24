@@ -56,6 +56,46 @@ else
             @inbounds outρ[i] = o.ρ
         end
 
+        # The two-kernel form: the first stage everywhere, the second only where
+        # the first is not done, through an index list.
+        @eval @kernel function _gpu_c2p_start!(outρ, stages, @Const(D), @Const(τ), @Const(DY), @Const(Sp),
+                                               @Const(Sq), @Const(B2), v, opts)
+            i = @index(Global)
+            o, st = EntropyEOS.con2prim_start(v, Con2PrimIn(D[i], τ[i], DY[i], Sp[i], Sq[i], B2[i]), opts)
+            @inbounds outρ[i] = o.ρ
+            @inbounds stages[i] = st
+        end
+
+        @eval @kernel function _gpu_c2p_finish!(outρ, @Const(idx), @Const(stages), @Const(D), @Const(τ),
+                                                @Const(DY), @Const(Sp), @Const(Sq), @Const(B2), v, opts)
+            j = @index(Global)
+            @inbounds i = idx[j]
+            cin = Con2PrimIn(D[i], τ[i], DY[i], Sp[i], Sq[i], B2[i])
+            @inbounds outρ[i] = EntropyEOS.con2prim_finish(v, cin, opts, stages[i]).ρ
+        end
+
+        @eval @kernel function _gpu_safe_start!(outρ, outf, stages, @Const(D), @Const(τ), @Const(DY), @Const(Sp),
+                                                @Const(Sq), @Const(B2), v, opts, proj)
+            i = @index(Global)
+            o, st = EntropyEOS.con2prim_safe_start(v, Con2PrimIn(D[i], τ[i], DY[i], Sp[i], Sq[i], B2[i]), opts, proj)
+            @inbounds outρ[i] = o.base.ρ
+            @inbounds outf[i] = o.policy_flags
+            @inbounds stages[i] = st
+        end
+
+        @eval @kernel function _gpu_safe_finish!(outρ, outf, @Const(idx), @Const(stages), @Const(D), @Const(τ),
+                                                 @Const(DY), @Const(Sp), @Const(Sq), @Const(B2), v, opts, proj)
+            j = @index(Global)
+            @inbounds i = idx[j]
+            cin = Con2PrimIn(D[i], τ[i], DY[i], Sp[i], Sq[i], B2[i])
+            o = EntropyEOS.con2prim_safe_finish(v, cin, opts, proj, stages[i])
+            @inbounds outρ[i] = o.base.ρ
+            @inbounds outf[i] = o.policy_flags
+        end
+
+        # The pending indices, compacted on the host so this runs on any backend.
+        @eval _gpu_pending(dstages) = DEVARRAY(Int32.(findall(!is_done, Array(dstages))))
+
         # Both levels of the never-fails path in one kernel.
         @eval @kernel function _gpu_safe!(outρ, outf, @Const(D), @Const(τ), @Const(DY), @Const(Sp), @Const(Sq),
                                           @Const(B2), v, opts, proj, pol)
@@ -127,6 +167,29 @@ else
                 rel = maximum(abs.(outg .- outc) ./ abs.(outc))
                 @info "GPU con2prim: max relative difference from host" rel
                 @test rel < sqrt(eps(T)) * 100
+
+                # Two kernels, and again with the seed and the Newton starved so
+                # that the second has work: the full seed alone solves these.
+                dD, dτ, dDY, dSp, dSq, dB2 = DEVARRAY.((D, τ, DY, Sp, Sq, B2))
+                for o in (opts, Con2PrimOptions{T}(; max_iter_newton=0, seed_passes=1))
+                    refc = T[con2prim(v, Con2PrimIn(D[i], τ[i], DY[i], Sp[i], Sq[i], B2[i]), o).ρ for i in 1:n]
+                    dout = DEVARRAY(zeros(T, n))
+                    dst = DEVARRAY{Con2PrimStage{T}}(undef, n)
+                    _gpu_c2p_start!(BACKEND, 64)(dout, dst, dD, dτ, dDY, dSp, dSq, dB2, dv, o; ndrange=n)
+                    KernelAbstractions.synchronize(BACKEND)
+                    idx = _gpu_pending(dst)
+                    if !isempty(idx)
+                        _gpu_c2p_finish!(BACKEND, 64)(dout, idx, dst, dD, dτ, dDY, dSp, dSq, dB2, dv, o;
+                                                      ndrange=length(idx))
+                        KernelAbstractions.synchronize(BACKEND)
+                    end
+                    outs = Array(dout)
+                    o === opts || @test length(idx) > 0
+                    @test all(isfinite, outs)
+                    rel = maximum(abs.(outs .- refc) ./ abs.(refc))
+                    @info "GPU con2prim, two kernels: max relative difference from host" pending = length(idx) rel
+                    @test rel < sqrt(eps(T)) * 100
+                end
             end
 
             @testset "con2prim_safe and apply_policy" begin
@@ -165,6 +228,33 @@ else
                 @test count(same) >= 0.99n
                 rel = maximum(abs.(outg[same] .- outc[same]) ./ outc[same])
                 @info "GPU con2prim_safe: max relative difference from host" rel
+                @test rel < sqrt(eps(T)) * 100
+
+                # Two kernels, level 1 only, against the host's fused level 1.
+                refρ = zeros(T, n)
+                reff = zeros(UInt32, n)
+                for i in 1:n
+                    o = con2prim_safe(v, Con2PrimIn(D[i], τ[i], DY[i], Sp[i], Sq[i], B2[i]), opts, proj)
+                    refρ[i], reff[i] = o.base.ρ, o.policy_flags
+                end
+                dD, dτ, dDY, dSp, dSq, dB2 = DEVARRAY.((D, τ, DY, Sp, Sq, B2))
+                dout = DEVARRAY(zeros(T, n))
+                dflag = DEVARRAY(zeros(UInt32, n))
+                dst = DEVARRAY{Con2PrimSafeStage{T}}(undef, n)
+                _gpu_safe_start!(BACKEND, 64)(dout, dflag, dst, dD, dτ, dDY, dSp, dSq, dB2, dv, opts, proj; ndrange=n)
+                KernelAbstractions.synchronize(BACKEND)
+                idx = _gpu_pending(dst)
+                @test length(idx) > 0
+                _gpu_safe_finish!(BACKEND, 64)(dout, dflag, idx, dst, dD, dτ, dDY, dSp, dSq, dB2, dv, opts, proj;
+                                               ndrange=length(idx))
+                KernelAbstractions.synchronize(BACKEND)
+                outs, flags = Array(dout), Array(dflag)
+                @test all(isfinite, outs)
+                same = flags .== reff
+                @info "GPU con2prim_safe, two kernels: flags agree with host" pending = length(idx) fraction = count(same) / n
+                @test count(same) >= 0.99n
+                rel = maximum(abs.(outs[same] .- refρ[same]) ./ refρ[same])
+                @info "GPU con2prim_safe, two kernels: max relative difference from host" rel
                 @test rel < sqrt(eps(T)) * 100
             end
         end

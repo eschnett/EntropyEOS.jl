@@ -16,6 +16,10 @@ _jet_eval(v, ρ, s, y, u) = EntropyEOS.evaluate(v, ρ, s, y, u)
 _jet_p2c(v, ρ, s, y, w, b, c, u) = EntropyEOS.prim2con(v, ρ, s, y, w, b, c, u)
 _jet_c2p(v, cin, o) = EntropyEOS.con2prim(v, cin, o)
 _jet_safe(v, cin, o, proj) = EntropyEOS.con2prim_safe(v, cin, o, proj)
+_jet_c2p_start(v, cin, o) = EntropyEOS.con2prim_start(v, cin, o)
+_jet_c2p_finish(v, cin, o, st) = EntropyEOS.con2prim_finish(v, cin, o, st)
+_jet_safe_start(v, cin, o, proj) = EntropyEOS.con2prim_safe_start(v, cin, o, proj)
+_jet_safe_finish(v, cin, o, proj, st) = EntropyEOS.con2prim_safe_finish(v, cin, o, proj, st)
 _jet_policy(v, cin, out, proj, pol) = EntropyEOS.apply_policy(v, cin, out, proj, pol)
 
 @testset "quality" begin
@@ -51,6 +55,14 @@ _jet_policy(v, cin, out, proj, pol) = EntropyEOS.apply_policy(v, cin, out, proj,
                 (V, Con2PrimIn{F}, Con2PrimOptions{F}, ProjectionOptions{F}))))
             @test isempty(JET.get_reports(JET.report_opt(_jet_policy,
                 (V, Con2PrimIn{F}, Con2PrimSafeOut{F}, ProjectionOptions{F}, PolicyOptions{F}))))
+            # Each stage of the two-kernel form on its own.
+            @test isempty(JET.get_reports(JET.report_opt(_jet_c2p_start, (V, Con2PrimIn{F}, Con2PrimOptions{F}))))
+            @test isempty(JET.get_reports(JET.report_opt(_jet_c2p_finish,
+                (V, Con2PrimIn{F}, Con2PrimOptions{F}, Con2PrimStage{F}))))
+            @test isempty(JET.get_reports(JET.report_opt(_jet_safe_start,
+                (V, Con2PrimIn{F}, Con2PrimOptions{F}, ProjectionOptions{F}))))
+            @test isempty(JET.get_reports(JET.report_opt(_jet_safe_finish,
+                (V, Con2PrimIn{F}, Con2PrimOptions{F}, ProjectionOptions{F}, Con2PrimSafeStage{F}))))
             # The analytic EOSs run the same solver, and must be as clean.
             for A in (typeof(IdealGasEOS(; Γ=2.0, K_ref=100.0, s_ref=5.0, s_window=(1.0, 20.0),
                                          ρ_bounds=(1e-10, 1e-2), yₑ_bounds=(0.0, 1.0))),
