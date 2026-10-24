@@ -1,0 +1,6 @@
+[deps]
+EntropyEOS_jll = "68355ae7-f132-5b57-a3c7-019718b5d293"
+
+[compat]
+EntropyEOS_jll = "1.1"
+julia = "1.10"
