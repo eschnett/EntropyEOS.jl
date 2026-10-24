@@ -149,14 +149,25 @@ end
 function edge_ends(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, shift::T,
                    w_lo::T, w_hi::T, u::T, opts::Con2PrimOptions{T}) where {S,T}
     # One call site in a loop rather than four: a GPU compiler inlines every
-    # call, and each copy of `residuals` carries a whole EOS evaluation.
-    rs = MVector{4,Residuals{T}}(undef)
-    @inbounds for k in 1:4
-        rs[k] = edge_residuals(eos, D, τ, yₑ, S_par, S_perp, B², k > 2, shift, isodd(k) ? w_lo : w_hi, u,
-                               opts.τ_floor_rel)
-        u = rs[k].pt.u_solved
+    # call, and each copy of `residuals` carries a whole EOS evaluation. The
+    # results go to plain variables: an `MVector` of `Residuals` is
+    # heap-allocated when the loop is not unrolled.
+    e = nan_edge_ends(T)
+    r1, r2, r3, r4 = e.min_lo, e.min_hi, e.max_lo, e.max_hi
+    for k in 1:4
+        r = edge_residuals(eos, D, τ, yₑ, S_par, S_perp, B², k > 2, shift, isodd(k) ? w_lo : w_hi, u, opts.τ_floor_rel)
+        if k == 1
+            r1 = r
+        elseif k == 2
+            r2 = r
+        elseif k == 3
+            r3 = r
+        else
+            r4 = r
+        end
+        u = r.pt.u_solved
     end
-    return @inbounds EdgeEnds{T}(rs[1], rs[2], rs[3], rs[4])
+    return EdgeEnds{T}(r1, r2, r3, r4)
 end
 
 """
