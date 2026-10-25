@@ -21,21 +21,6 @@ include("common.jl")
 const FLAGS = parse_flags(ARGS)
 const N = parse(Int, get(FLAGS, "n", "20000"))
 
-function sample_valid(v, rng; w_max_sample=6.0, sigma_max=1e4, margin=0.05)
-    xspan = v.x_hi - v.x_lo
-    xlo, xhi = v.x_lo + margin * xspan, v.x_hi - margin * xspan
-    ρ = exp10(xlo + rand(rng) * (xhi - xlo))
-    yₑ = v.y_lo + rand(rng) * (v.y_hi - v.y_lo)
-    sr = srange(v, ρ, yₑ)
-    sspan = sr.s_max - sr.s_min
-    s = sr.s_min + margin * sspan + rand(rng) * (sspan - 2margin * sspan)
-    w = rand(rng) * w_max_sample
-    b2_zero = rand(rng) < 0.1
-    σ = exp(log(1e-6) + rand(rng) * (log(sigma_max) - log(1e-6)))
-    pt = E.evaluate(v, ρ, s, yₑ, NaN)
-    return (ρ=ρ, s=s, yₑ=yₑ, w=w, B²=(b2_zero ? 0.0 : σ * ρ * pt.h), cos_vB=-1 + 2rand(rng), u=pt.u_solved)
-end
-
 inner(v, c, ye, s, opts) = E.inner_solve_w(v, c.D, c.τ, ye, c.S_par, c.S_perp, c.B², s, E.w_floor(v, c.D, opts.w_max),
                                            opts.w_max, opts.τ_floor_rel, 0.0, NaN, opts.max_iter_1d, opts.tol)[1]
 

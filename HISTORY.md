@@ -15,6 +15,7 @@ recorded each item in the documentation.
 - [Testing](#testing)
   - [Static analysis](#static-analysis)
 - [Precision and devices](#precision-and-devices)
+  - [Not-quite-transcendental functions](#not-quite-transcendental-functions)
 
 ## Scope
 
@@ -740,3 +741,93 @@ Several of these had drifted before the change. The previous commit, measured
 in the same job, gave 5.79e-10 for the LS220 cold ρ p99, 99.989% agreement,
 0.54 / 0.52 for LS220's Float32 cold ρ p99, and 10.5% for DD2's Float32
 excess failures.
+
+### Not-quite-transcendental functions
+
+2026-10-25. Rejected replacing `log10`, `exp10` and the hyperbolic functions
+with not-quite-transcendental (NQT) ones: the binary exponent plus a
+polynomial in the mantissa, exactly invertible and cheaper than the real
+functions (Miller, Dolence & Holladay,
+[arXiv:2206.08957](https://arxiv.org/abs/2206.08957); Hammond et al.,
+[arXiv:2501.05410](https://arxiv.org/abs/2501.05410)). The C++ design notes had
+deferred them until an accuracy study (`eos-device-interface.md` §8); this is
+that study. Measured by `study/nqt.jl` on one Apple M3 thread.
+
+There is little to gain. On the five real tables, 100,000 states each, sampled
+as `test/test_real_tables.jl` does, a cold `evaluate` takes 1.8–4.2 µs and
+9.4–9.8 temperature-solve iterations; its one `log10` and three `exp10` take
+13.4 ns, 0.3–0.7%. The temperature solve iterates in log T itself, so its loop
+calls none. A `con2prim` warm-started from the truth perturbed by 1e-3 takes
+3.0–3.7 µs and 4.2–4.3 residual evaluations; their `cosh`, `sinh`, `tanh` and
+`sinh(w/2)` take 70–78 ns, 2.0–2.4%. The times moved by up to a factor of two
+between runs, and with them the shares: an earlier run gave 1.0% and 2.6% on
+LS220. `acosh` runs only on the projection's slow path and for the default
+`w_cap`. The GPU was not measured; Hammond et al. found no gain on GPUs for EOS
+lookups in singularity-eos, where a linear interpolation costs much less than a
+tricubic spline with derivatives.
+
+And accuracy is lost where the design needs it. The published NQT logarithms
+are C⁰ (NQTo1; the 2022 paper's "C¹" is corrected in the 2025 one) and C¹
+(NQTo2). That suffices for the linear interpolation they were made for, and
+Hammond et al. say higher-order interpolation will not benefit. Here p and cs²
+are derivatives of a C² spline ([CODE.md](CODE.md#type-design)). In a 1-D test,
+`fit_bspline_1d` fitted log₂ U, for U = ρ^0.5 + 0.1 ρ^1.2 on ρ ∈ [1, 2²⁰], at
+nodes uniform in log₂ ρ or in an NQT version of it. Maximum relative errors on
+[2, 2¹⁹] at spacing h = 1/8, which puts the powers of two on grid points, and
+for cs² also at h = 0.13, which does not; "wiggle" is the largest deviation of
+the NQT log₂ from log₂:
+
+| axis | wiggle | U | ρ²U_ρ | h·cs² | h·cs², h = 0.13 |
+| --- | --- | --- | --- | --- | --- |
+| log₂ | 0 | 4.4e-9 | 1.9e-7 | 1.1e-5 | 1.2e-5 |
+| NQTo1: C⁰, degree 1 | 8.6e-2 | 6.7e-3 | 0.48 | 16 | 13 |
+| NQTo2: C¹, degree 2 | 9.7e-3 | 3.8e-4 | 0.020 | 0.45 | 0.51 |
+| C², degree 3 | 4.4e-3 | 6.1e-6 | 2.0e-4 | 7.4e-3 | 3.4e-2 |
+| C³, degree 4 | 1.8e-3 | 4.0e-6 | 1.2e-4 | 3.0e-3 | 3.2e-3 |
+| C⁴, degree 5 | 4.8e-4 | 5.9e-7 | 1.7e-5 | 8.8e-4 | 1.1e-3 |
+| C², degree 7, fitted to log₂ | 7.9e-7 | 4.3e-7 | 1.3e-5 | 3.5e-4 | 5.5e-4 |
+| C², degree 9, fitted to log₂ | 1.7e-8 | 2.0e-8 | 8.4e-7 | 3.4e-5 | 3.0e-5 |
+| C², degree 11, fitted to log₂ | 4.0e-10 | 4.6e-9 | 1.9e-7 | 1.2e-5 | 1.2e-5 |
+
+Halving h from 1/4 to 1/32, log₂ converges at orders 4, 3 and 2 in U, p and
+cs². NQTo1 converges at order 1 in U and not at all in p, and its cs² error
+grows as 1/h; NQTo2 converges at orders 2 and 1, and its cs² error stays at
+0.43–0.48. The errors sit at the powers of two, so a table would have them once
+per factor of two in ρ, in T, and in ε, which is fitted as log₁₀ ε. The tables
+would also have to be resampled: their nodes are uniform in log₁₀ ρ and
+log₁₀ T, and a cheap cell lookup needs nodes uniform in the NQT coordinate.
+
+Smoother variants exist, but smoothness is not the main cost. Write the NQT
+log₂ as p + f(t), with t = m − 1 for the mantissa m ∈ [½, 1). Then
+lg(2n) = lg(n) + 1 makes it C^k if and only if f(0) = 0, f(−½) = −1 and
+f⁽ʲ⁾(−½) = 2ʲ f⁽ʲ⁾(0) for j = 1…k, which fix a polynomial of degree k + 1:
+k = 1 is NQTo2, k = 2 is f(t) = (10t − 4t² + 8t³)/7, and up to k = 4 all are
+monotone. No polynomial is C^∞, since the condition on its highest derivative
+forces the leading coefficient to zero. The C² cubic recovers orders 4, 3 and 2
+when the powers of two are grid points; when they are not, cs² converges at
+first order only. What remains is the wiggle. On a log axis a power law is a
+straight line, which a cubic spline reproduces exactly; on an NQT axis it picks
+up the periodic deviation from log₂, one period per factor of two, and the
+spline has to resolve that. So the C², C³ and C⁴ polynomials stay 80–700 times
+above log₂ in cs². Further degrees spent on a least-squares fit to log₂ shrink
+the wiggle, and matching log₂ took degree 11: a polynomial approximation of the
+logarithm of the kind libm already uses, with no speed left to gain. From
+degree 3 on, the inverse, which the three `exp10` call sites would need, is an
+iterative root solve as well.
+
+The hyperbolic functions fare worse, because there the identities are physics.
+NQT `cosh` and `sinh` built from an NQT exponential E give
+cosh² − sinh² = E(w)E(−w), which is 1 only where w/ln 2 is an integer; it
+reaches 1.125 for NQTo1 and 1.0066 for NQTo2, at w = ½ ln 2. W and v would then
+disagree with W = 1/√(1 − v²) by up to 5.7% and 0.33%, and the energy
+residual's cancellation-free cosh w − 1 = 2 sinh²(w/2) would fail by up to 100%
+and 20%.
+An NQT `acosh` paired with the true `cosh` puts the projection's rapidity bounds
+off ρ_min and ρ_max by up to 5.8% and 0.67%. The one consistent use is a new
+Newton variable, u = Wv = S(ŵ) for some cheap monotone S, with W = √(1 + u²)
+and v = u/W, which would change the solver for a gain of at most 3%.
+
+Also not pursued: if those 3% ever matter, all four functions follow exactly
+from one e = expm1(w), as sinh w = e(e + 2)/(2(e + 1)),
+cosh w − 1 = e²/(2(e + 1)) and tanh w = sinh w / cosh w. That would be a
+deviation from the C++, and `prim2con` would have to follow it.

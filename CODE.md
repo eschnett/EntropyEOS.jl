@@ -880,6 +880,11 @@ What is easy to get wrong here:
 - **`con2prim_tol(Float32)` is measured**, at 512 eps, just above the Float32
   residual's noise floor. The generic 64-eps fallback was below it and made
   Newton stall.
+- **Cheaper logarithms do not pay.** Not-quite-transcendental replacements for
+  `log10`, `exp10` and the hyperbolic functions were measured and rejected:
+  those calls are a few percent of the work, and an NQT axis spoils the C²
+  fit's p and cs² near every power of two
+  ([HISTORY](HISTORY.md#not-quite-transcendental-functions)).
 
 ## Validation against the C++
 
