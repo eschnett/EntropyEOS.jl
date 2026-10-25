@@ -43,6 +43,28 @@ function load_tables(dir; only=nothing)
     return out
 end
 
+"""
+    sample_valid(v, rng; w_max_sample=6.0, sigma_max=1e4, margin=0.05)
+
+A valid primitive state, sampled as `test/test_real_tables.jl` does: inside a
+`margin` of the density box and of the entropy window, `w` uniform in
+`[0, w_max_sample]`, and magnetized in 90% of cases, log-uniformly in `B²/(ρh)`.
+"""
+function sample_valid(v, rng; w_max_sample=6.0, sigma_max=1e4, margin=0.05)
+    xspan = v.x_hi - v.x_lo
+    xlo, xhi = v.x_lo + margin * xspan, v.x_hi - margin * xspan
+    ρ = exp10(xlo + rand(rng) * (xhi - xlo))
+    yₑ = v.y_lo + rand(rng) * (v.y_hi - v.y_lo)
+    sr = srange(v, ρ, yₑ)
+    sspan = sr.s_max - sr.s_min
+    s = sr.s_min + margin * sspan + rand(rng) * (sspan - 2margin * sspan)
+    w = rand(rng) * w_max_sample
+    b2_zero = rand(rng) < 0.1
+    σ = exp(log(1e-6) + rand(rng) * (log(sigma_max) - log(1e-6)))
+    pt = E.evaluate(v, ρ, s, yₑ, NaN)
+    return (ρ=ρ, s=s, yₑ=yₑ, w=w, B²=(b2_zero ? 0.0 : σ * ρ * pt.h), cos_vB=-1 + 2rand(rng), u=pt.u_solved)
+end
+
 converged(r) = r === E.C2PResult.converged_newton || r === E.C2PResult.converged_fallback
 
 """Quantile by the C++ harness's convention, `v[floor(p*(n-1))]` of the sorted data."""
