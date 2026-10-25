@@ -309,6 +309,7 @@ end
                                1.2rand(rng) - 0.1, 5rand(rng))
                 ps2, flags = project_prim_state(eos, ps, proj)
                 @test flags == check_prim_state(eos, ps, proj)
+                @test inside_window(eos, ps2.ρ, ps2.s, ps2.ye)
                 ps3, flags3 = project_prim_state(eos, ps2, proj)
                 @test ps3 === ps2 && flags3 == 0
             end

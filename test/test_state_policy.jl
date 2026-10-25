@@ -379,6 +379,7 @@
             ps2, flags2 = project_prim_state(v, ps, proj)
             @test flags == flags2                       # checking and projecting agree
             @test check_prim_state(v, ps2, proj) == 0   # the result is valid
+            @test inside_window(v, ps2.ρ, ps2.s, ps2.ye)
             # Idempotent, and bitwise so: a projection that only approximately
             # repeats itself has a bug.
             ps3, flags3 = project_prim_state(v, ps2, proj)
@@ -405,5 +406,59 @@
         @test chk(NaN, smid, 0.35, 0.5) == FLAG_POL_NONFINITE
         @test chk(0.0, smid, 0.35, 0.5) == FLAG_POL_NONFINITE
         @test chk(ρmid, smid, 0.35, -0.1) == FLAG_POL_NONFINITE
+    end
+
+    @testset "inside_window" begin
+        ρm = exp10(0.5 * (v.x_lo + v.x_hi))
+        srm = srange(v, ρm, 0.35)
+        slack = δ * (srm.s_max - srm.s_min)
+        smid = 0.5 * (srm.s_min + srm.s_max)
+
+        # It is check_prim_state's Yₑ and s tests, at any density: with the ρ
+        # and w faces opened, the two agree, also within a few slacks of an edge.
+        open_proj = ProjectionOptions(; ρ_min=floatmin(), ρ_max=floatmax(), w_cap=floatmax())
+        rng = StableRNG(37)
+        for _ in 1:500
+            ρ = exp10(v.x_lo - 1 + (v.x_hi - v.x_lo + 2) * rand(rng))
+            yₑ = v.y_lo - 0.05 + (v.y_hi - v.y_lo + 0.1) * rand(rng)
+            sr = srange(v, ρ, yₑ)
+            width = sr.s_max - sr.s_min
+            s = rand(rng) < 0.5 ? sr.s_min - 1 + (width + 2) * rand(rng) :
+                (rand(rng) < 0.5 ? sr.s_min : sr.s_max) + (4rand(rng) - 2) * δ * width
+            @test inside_window(v, ρ, s, yₑ) == (check_prim_state(v, PrimState(ρ, s, yₑ, 0.0), open_proj) == 0)
+        end
+
+        # The band: half a slack past an edge is inside, two are not, and Yₑ
+        # may be one ulp out of range, as Yₑ·D/D can come back.
+        @test inside_window(v, ρm, smid, 0.35)
+        @test inside_window(v, ρm, srm.s_min - slack / 2, 0.35)
+        @test !inside_window(v, ρm, srm.s_min - 2slack, 0.35)
+        @test inside_window(v, ρm, srm.s_max + slack / 2, 0.35)
+        @test !inside_window(v, ρm, srm.s_max + 2slack, 0.35)
+        for (y_in, y_out) in ((nextfloat(v.y_hi), nextfloat(v.y_hi, 2)), (prevfloat(v.y_lo), prevfloat(v.y_lo, 2)))
+            sr = srange(v, ρm, y_in)     # the window moves with Yₑ
+            s = 0.5 * (sr.s_min + sr.s_max)
+            @test inside_window(v, ρm, s, y_in)
+            @test !inside_window(v, ρm, s, y_out)
+        end
+        # ρ is not tested against a range ...
+        for ρ in (1e-3ρ_min, 1e3ρ_max)
+            sr = srange(v, ρ, 0.35)
+            @test inside_window(v, ρ, 0.5 * (sr.s_min + sr.s_max), 0.35)
+        end
+        # ... but there is no window at a non-positive or non-finite density.
+        for (ρ, s, yₑ) in ((NaN, smid, 0.35), (Inf, smid, 0.35), (0.0, smid, 0.35), (-ρm, smid, 0.35),
+                           (ρm, NaN, 0.35), (ρm, Inf, 0.35), (ρm, smid, NaN))
+            @test !inside_window(v, ρ, s, yₑ)
+        end
+
+        # What it is for: a state within the slack of an s face comes back from
+        # con2prim_safe unflagged and outside the exact window, and passes.
+        for (s0, outside) in ((srm.s_min - slack / 2, s -> s < srm.s_min), (srm.s_max + slack / 2, s -> s > srm.s_max))
+            out = con2prim_safe(v, cin_of(prim2con(v, ρm, s0, 0.35, 0.4, 0.0, 1.0, NaN)), opts, proj)
+            @test out.policy_flags == 0
+            @test outside(out.base.s)
+            @test inside_window(v, out.base.ρ, out.base.s, out.base.ye)
+        end
     end
 end

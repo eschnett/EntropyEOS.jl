@@ -88,7 +88,7 @@ export
     default_projection, con2prim_safe, apply_policy,
     Con2PrimStage, Con2PrimSafeStage, is_done, con2prim_start, con2prim_finish,
     con2prim_safe_start, con2prim_safe_finish,
-    check_prim_state, project_prim_state, check_con_state,
+    check_prim_state, project_prim_state, check_con_state, inside_window,
     # Tables
     RawTable, validate_axes, add_field!, has_field, field, field_names,
     add_attribute!, has_attribute, attribute, attribute_names, energy_shift,
