@@ -16,7 +16,7 @@ cluster; the host is AMD EPYC 7543.
 For production on NVIDIA hardware use Float64. If table memory or bandwidth
 matters, the mixed configuration halves it at essentially no cost to con2prim.
 Pure Float32 runs, never produces a non-finite state through
-[`con2prim_safe`](@ref), and on an H200 is 1.5× (evaluate) to 3.9× (cold
+[`con2prim_safe`](@ref), and on an H200 is 1.5× (evaluate) to 2.8× (warm
 con2prim) faster — but its limits are real, and most of them come from storing
 the *hydro state* in Float32, not from this package.
 
@@ -52,14 +52,14 @@ five real tables. The parity run passes every gate on every table:
 
 | LS220, 2²⁰ states | host | device |
 | --- | --- | --- |
-| cold converged | 1025421 | 1025417 |
-| cold round trip ρ, p99 / max | 3.37e-9 / 33.2 | 3.39e-9 / 33.5 |
+| cold converged | 1025528 | 1025524 |
+| cold round trip ρ, p99 / max | 4.92e-10 / 1.57 | 5.03e-10 / 1.57 |
 | warm round trip ρ, p99 | 1.60e-16 | 2.37e-16 |
-| evaluate `p`, device − host, p99 / max | | 1.98e-13 / 1.56e-12 |
+| evaluate `p`, device − host, p99 / max | | 1.98e-13 / 5.98e-13 |
 | `con2prim_safe` non-finite outputs | | 0 |
 
-These match the C++ H200 run on LS220 (device − host `p` 1.98e-13 / 1.53e-12).
-Cold-result agreement is 99.85%; the differing states sit on the solver's
+The p99 matches the C++ H200 run on LS220 (device − host `p` 1.98e-13, maximum
+1.53e-12). Cold-result agreement is 99.999%; the differing states sit on the solver's
 failure boundary and flip in both directions, which is why the gate is on the
 failure *rate*, not per state.
 
@@ -174,7 +174,7 @@ The device matches the host at Float32 statistically, not state by state:
 
 | 2²⁰ states | LS220 | SRO LS220 | DD2 | SFHo |
 | --- | --- | --- | --- | --- |
-| cold ρ p99, host / device | 0.24 / 0.28 | 0.16 / 0.24 | 0.16 / 0.15 | 0.10 / 0.10 |
+| cold ρ p99, host / device | 0.20 / 0.22 | 0.15 / 0.19 | 0.14 / 0.14 | 0.08 / 0.08 |
 | evaluate `p`, device − host, p99 | 1.5e-4 | 2.0e-4 | 1.7e-4 | 1.7e-4 |
 | `con2prim_safe` non-finite | 0 | 0 | 0 | 0 |
 
@@ -188,31 +188,31 @@ Float64: it is the derivative cancellation above, not a device defect. Two of
 the C++ gates therefore do not hold at Float32 and are reported rather than
 loosened: the warm-start maximum (up to 0.9 on the device, from a start that is
 the host's exact answer but a ~1e-4-noisy residual to the device); and on DD2,
-6% more cold failures on the device than on the host, just over the gate's
+11% more cold failures on the device than on the host, against the gate's
 5% + 10.
 
 ## Throughput
 
-H200, 2²⁰ states, millions of states per second, LS220, measured 2026-10-23.
-The node is shared, so treat these as ±20%; a repeat in the same job
-reproduced the Float64 row to 3%.
+H200, 2²⁰ states, millions of states per second, LS220, measured 2026-10-25.
+The node is shared, so treat these as ±20%; interleaved repeats reproduced
+single entries to 3%.
 
 | | evaluate | con2prim cold | con2prim warm |
 | --- | --- | --- | --- |
-| Float64 | 311 | 1.5 | 315 |
-| Float64, two kernels | | 4.0 | |
-| mixed | 357 | 1.2 | 336 |
-| Float32 | 474 | 5.8 | 859 |
-| Float32, two kernels | | 13.1 | |
+| Float64 | 314 | 5.1 | 292 |
+| Float64, two kernels | | 9.1 | |
+| mixed | 357 | 4.5 | 313 |
+| Float32 | 475 | 13.3 | 814 |
+| Float32, two kernels | | 20.7 | |
 | C++, Float64 (repaired LS220) | 381 | 0.6 | 529 |
 
 In one kernel, cold `con2prim` is limited by warp divergence: a warp runs as
 long as its slowest state, and on LS220 2.2% of cold states need the fallback
 or fail, so about half the warps of 32 contain one and wait for it. On the
-synthetic table, where none do, Float64 cold runs at 67. Running the fallback
+synthetic table, where none do, Float64 cold runs at 64. Running the fallback
 as a second kernel over only the states that need it (`con2prim_start` and
 `con2prim_finish`) gives the "two kernels" rows; on the other real tables
-Float64 cold then reaches 2.1–5.1.
+Float64 cold then reaches 4.6–8.4.
 
 The H200's FP64 throughput is unusually high; on consumer GPUs the Float32
 advantage is much larger.

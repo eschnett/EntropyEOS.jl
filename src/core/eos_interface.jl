@@ -51,7 +51,8 @@ Base.eltype(::AbstractEOS{T}) where {T} = T
     logρ_bounds(eos) -> (x_lo, x_hi)
 
 The physical density box of `eos` in `x = log10(ρ★)`. The state policy's
-default atmosphere and density ceiling are its two ends.
+default atmosphere and density ceiling are its two ends, and `con2prim` never
+searches above its upper end.
 """
 function logρ_bounds end
 
