@@ -155,7 +155,7 @@ page has the measurements. The GPU testset is described in
 [CODE.md § Testing](CODE.md#testing).
 
 A few states that need `con2prim`'s fallback hold up the warps they are in.
-Running it as a second kernel over only those states made cold `con2prim` 1.5–2.7
+Running it as a second kernel over only those states made cold `con2prim` 1.8–2.7
 times faster on an H200
 ([CODE.md § Discipline in `core/`](CODE.md#discipline-in-core)); the same
 works for `con2prim_safe` with `con2prim_safe_start` and `con2prim_safe_finish`:

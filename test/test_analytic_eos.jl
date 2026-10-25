@@ -38,6 +38,25 @@ EntropyEOS.logρ_bounds(::ToyEOS) = (-8.0, -2.0)
 EntropyEOS.yₑ_bounds(::ToyEOS) = (0.0, 1.0)
 EntropyEOS.κ(::ToyEOS) = 1.0
 
+"""
+A test-only wrapper that records the highest density at which the solver
+evaluates the EOS inside it, and otherwise passes everything through.
+"""
+struct SpyEOS{E<:EntropyEOS.AbstractEOS{Float64}} <: EntropyEOS.AbstractEOS{Float64}
+    eos::E
+    ρ_seen::Base.RefValue{Float64}
+end
+SpyEOS(eos) = SpyEOS(eos, Ref(0.0))
+function EntropyEOS.evaluate(e::SpyEOS, ρ::T, s::T, yₑ::T, u_guess::T) where {T}
+    e.ρ_seen[] = max(e.ρ_seen[], Float64(ρ))
+    return evaluate(e.eos, ρ, s, yₑ, u_guess)
+end
+EntropyEOS.srange(e::SpyEOS, ρ::T, yₑ::T) where {T} = srange(e.eos, ρ, yₑ)
+EntropyEOS.srange_extended(e::SpyEOS, ρ::T, yₑ::T) where {T} = srange_extended(e.eos, ρ, yₑ)
+EntropyEOS.logρ_bounds(e::SpyEOS) = logρ_bounds(e.eos)
+EntropyEOS.yₑ_bounds(e::SpyEOS) = yₑ_bounds(e.eos)
+EntropyEOS.κ(e::SpyEOS) = EntropyEOS.κ(e.eos)
+
 # The SLy crust of O'Boyle et al. (2020), Table II. The table prints 1.826e6 for
 # the second break, which is inconsistent with its own K, Λ and a columns:
 # 1.826e8 reproduces all three, and 1.826e6 makes the pressure negative.
@@ -261,6 +280,62 @@ end
             @test r.eρ < 3e-11
             @test r.es < 1e-10
         end
+    end
+
+    @testset "con2prim stays inside the density box" begin
+        # The hybrid is causal on its box, but its last polytrope continues
+        # above it and turns acausal: cs² is 0.97 at the box's top, 2·10¹⁵, and
+        # 1.26 at 3·10¹⁵. A solve whose rapidity bracket reached down to rest
+        # swept densities up to D = ρW through that, and found extra roots of
+        # the inner solve there: 99 of these 300 states failed cold.
+        spy = SpyEOS(sly_hybrid())
+        x_lo, x_hi = logρ_bounds(spy)
+        ρ_top = exp10(x_hi) * (1 + E.face_slack(Float64))
+        opts = Con2PrimOptions()
+        conv(out) = out.result === E.C2PResult.converged_newton || out.result === E.C2PResult.converged_fallback
+        function cons(rng, ρ, w)
+            sr = srange(spy.eos, ρ, 0.5)
+            s = sr.s_min + (sr.s_max - sr.s_min) * (0.02 + 0.96rand(rng))
+            pt = evaluate(spy.eos, ρ, s, 0.5, NaN)
+            B² = rand(rng) < 0.5 ? pt.p * exp10(-3 + 4rand(rng)) : 0.0
+            c = prim2con(spy.eos, ρ, s, 0.5, w, B², 2rand(rng) - 1, NaN)
+            return Con2PrimIn(c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²), pt
+        end
+        rng = StableRNG(3)
+        nfail = 0
+        eρ = 0.0
+        for _ in 1:300
+            ρ = exp10(x_hi - 0.3rand(rng))
+            w = 2.5 + 3.5rand(rng)
+            cin, pt = cons(rng, ρ, w)
+            out = con2prim(spy, cin, opts)
+            conv(out) || (nfail += 1)
+            # Per condition number, as in round_trip, and the momentum
+            # equation's own: dφ/dw at the root falls as 1 − cs²·v², and cs²
+            # reaches 0.97 here, at W up to 200.
+            eρ = max(eρ, abs(out.ρ - ρ) / ρ * (1 - pt.cs² * tanh(w)^2) / (pt.h * cosh(w)^2))
+        end
+        @test nfail == 0
+        @test eρ < 2e-11
+        @test spy.ρ_seen[] <= ρ_top * (1 + 1e-12)
+
+        # Above the box there is nothing to find. A state there comes back
+        # unsolved, or as a state inside the box with the same conservatives,
+        # which the acausal extension makes possible; the projection's contract
+        # holds either way.
+        proj = default_projection(spy.eos, exp10(x_lo + 1))
+        spy.ρ_seen[] = 0.0
+        nconv = 0
+        for _ in 1:100
+            cin, _ = cons(rng, exp10(x_hi + rand(rng)), 4rand(rng))
+            out = con2prim(spy, cin, opts)
+            conv(out) && (nconv += 1)
+            @test out.ρ <= ρ_top * (1 + 1e-12)
+            safe = con2prim_safe(spy.eos, cin, opts, proj)
+            @test isempty(policy_violations(spy.eos, proj, opts, cin, safe))
+        end
+        @test nconv < 50
+        @test spy.ρ_seen[] <= ρ_top * (1 + 1e-12)
     end
 
     @testset "Float32 smoke test" begin

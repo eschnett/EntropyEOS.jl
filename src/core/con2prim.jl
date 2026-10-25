@@ -12,6 +12,11 @@
 # Production path is a damped 2×2 Newton with an analytic Jacobian. The nested
 # 1-D scheme is the guaranteed fallback: the inner solve for w at fixed s has a
 # unique root, and the outer solve in s is bracketed by a multi-point scan.
+#
+# Every iterate stays inside the EOS's density box, ρ = D/cosh(w) ≤ ρ_max, so
+# w ≥ w_floor(D). The inner root is unique only where cs²·v² < 1, and above the
+# box the extension is acausal; a search allowed to sweep up to ρ = D found
+# extra roots there for fast states near the top of the box.
 
 """
     Con2PrimIn
@@ -200,6 +205,64 @@ trade a real improvement in the energy residual for a cosmetic one in momentum.
 end
 
 """
+    w_floor(eos, D, w_max)
+
+The least rapidity at which a state with rest-mass density `D` lies inside the
+EOS's density box, `ρ = D/cosh(w) ≤ ρ_max`: zero for `D ≤ ρ_max`, and never above
+`w_max`.
+
+Every iterate of the solver keeps `w ≥ w_floor`, so it never evaluates the EOS
+above its box. There the table is extended only so that an evaluation stays
+finite, and acausally; a search sweeping up to `ρ = D` found extra roots of the
+inner solve there for fast states near the top of the box, although the state
+inside it was unique (CODE.md, "Deliberate deviations from the C++").
+
+The box ends at `ρ_max` widened by the projection's `face_slack`: a state that
+`con2prim_safe` writes onto that face must solve again, and `acosh` of its
+`D/ρ_max` can round to a hair above its own rapidity.
+"""
+@inline function w_floor(eos::AbstractEOS, D::T, w_max::T) where {T}
+    ρ_max = ρ_ceiling(eos, T)
+    D > ρ_max || return zero(T)
+    w = acosh(D / ρ_max)
+    return w < w_max ? w : w_max
+end
+
+"""The top of the density box as [`w_floor`](@ref) sees it, widened by `face_slack`."""
+@inline ρ_ceiling(eos::AbstractEOS, ::Type{T}) where {T} = exp10(T(last(logρ_bounds(eos)))) * (one(T) + face_slack(T))
+
+"""
+    above_floor(eos, D, w)
+
+Is `w ≥ 0` at or above [`w_floor`](@ref)`(eos, D, ⋅)`? A sufficient test, not a
+necessary one, that needs no `acosh`.
+
+A warm start almost always passes, and then needs the floor only if the Newton
+steps. About 8% of states have `D > ρ_max`, which on a GPU puts one in nearly
+every warp; skipping their `acosh` made the first stage of a warm `con2prim`
+3–5% faster on an H200 (CODE.md, "Discipline in `core/`").
+"""
+@inline function above_floor(eos::AbstractEOS, D::T, w::T) where {T}
+    ρ_max = ρ_ceiling(eos, T)
+    D > ρ_max || return true
+    # cosh's Taylor series to w⁸. Every term is positive, so the sum is a lower
+    # bound, within 11% of cosh up to w = 6.
+    w² = w * w
+    c = one(T) + w² * (inv(T(2)) + w² * (inv(T(24)) + w² * (inv(T(720)) + w² * inv(T(40320)))))
+    return D <= ρ_max * c
+end
+
+"""
+    clamp_w(w, w_lo, w_max)
+
+A Newton step's rapidity, held in `[w_lo, w_max]`. With the bracket open at rest
+(`w_lo = 0`) a negative step is reflected to `tiny_w` rather than onto zero; on
+the `ρ_max` face it stops on the face.
+"""
+@inline clamp_w(w::T, w_lo::T, w_max::T) where {T} =
+    w < w_lo ? (w_lo > zero(T) ? w_lo : tiny_w(T)) : (w > w_max ? w_max : w)
+
+"""
     residuals(eos, D, τ, yₑ, S_par, S_perp, B², s, w, u_prev, τ_floor_rel)
 
 Evaluate both residuals and the analytic Jacobian at one trial `(s, w)`.
@@ -273,29 +336,39 @@ residuals(eos::AbstractEOS{S}, D, τ, yₑ, S_par, S_perp, B², s, w, u_prev, τ
     residuals(eos, promote(D, τ, yₑ, S_par, S_perp, B², s, w, u_prev, τ_floor_rel)...)
 
 """
-    inner_solve_w(eos, D, τ, yₑ, S_par, S_perp, B², s, w_max, τ_floor_rel, w_start, u_prev,
+    inner_solve_w(eos, D, τ, yₑ, S_par, S_perp, B², s, w_lo, w_max, τ_floor_rel, w_start, u_prev,
                   max_iter_1d, tol)
 
-Solve `f₁(w; s) = 0` on `[0, w_max]`, returning `(residuals, iterations)`.
+Solve `f₁(w; s) = 0` on `[w_lo, w_max]`, returning `(residuals, iterations)`.
+`w_lo` is [`w_floor`](@ref), the rapidity below which the state would lie above
+the density box.
 
-The root is unique: at fixed entropy the momentum residual is strictly
-increasing in rapidity, negative at rest and unbounded above, so a bracketed
-safeguarded Newton cannot fail. That proof is the reason the formulation uses
-rapidity in the first place.
+At a root of `f₁` the crossing rises wherever `cs²·v² < 1`, so inside a causal
+box the root is unique and a bracketed safeguarded Newton finds it. That is the
+reason the formulation uses rapidity in the first place, and the reason the
+bracket ends at the box: above it the extension is acausal.
+
+The root may lie at or beyond the `ρ_max` face, and then `f₁ ≥ 0` on the face.
+The face is tested once, when the iteration would otherwise bisect towards it,
+and if so the solve returns the face rather than bisect its budget away.
 """
 function inner_solve_w(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, s::T,
-                       w_max::T, τ_floor_rel::T, w_start::T, u_prev::T, max_iter_1d::Integer,
+                       w_lo::T, w_max::T, τ_floor_rel::T, w_start::T, u_prev::T, max_iter_1d::Integer,
                        tol::T) where {S,T}
-    lo = zero(T)
+    lo = w_lo
     hi = w_max
     w = clamp(w_start, lo, hi)
     r = residuals(eos, D, τ, yₑ, S_par, S_perp, B², s, w, u_prev, τ_floor_rel)
 
+    # The face has not been tested yet; at rest there is none.
+    face_open = w_lo > zero(T)
     iters = Int32(0)
     while !f1_converged(r, tol) && iters < max_iter_1d
         iters += one(Int32)
         # f₁ increases with w, so its sign says which way the root lies.
         r.f1 < zero(T) ? (lo = w) : (hi = w)
+        # On the face with the root at or beyond it: nothing inside the box to find.
+        (w == w_lo && w_lo > zero(T) && r.f1 >= zero(T)) && break
 
         w_next = zero(T)
         newton_ok = false
@@ -303,7 +376,16 @@ function inner_solve_w(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_pe
             w_next = w - r.f1 / r.df1_dw
             newton_ok = isfinite(w_next) && lo < w_next < hi
         end
-        newton_ok || (w_next = T(0.5) * (lo + hi))
+        if !newton_ok
+            if face_open && lo == w_lo && r.f1 >= zero(T)
+                # Evaluated through the loop's own call, not a second one: a
+                # GPU compiler inlines every call site.
+                w_next = w_lo
+                face_open = false
+            else
+                w_next = T(0.5) * (lo + hi)
+            end
+        end
 
         w = w_next
         r = residuals(eos, D, τ, yₑ, S_par, S_perp, B², s, w, r.pt.u_solved, τ_floor_rel)
@@ -337,7 +419,7 @@ delegated, to keep the fallback path allocation-free.
 end
 
 """
-    bracket_scan(eos, D, τ, yₑ, S_par, S_perp, B², w_max, τ_floor_rel, n_scan, s_in, w_in,
+    bracket_scan(eos, D, τ, yₑ, S_par, S_perp, B², w_lo, w_max, τ_floor_rel, n_scan, s_in, w_in,
                  w_seed0, u_seed0, max_iter_1d, tol; nmax = Val(BRACKET_SCAN_MAX))
 
 Find a sign-changing interval in `s` for the outer solve.
@@ -360,13 +442,18 @@ manufacture a false bracket that masks the real one.
 
 `nmax` sizes the stack scratch. It is a `Val` so a GPU caller can shrink the
 per-thread local memory without touching the algorithm.
+
+The scan stays inside the density box, `w ≥ w_lo`, and starts at its least
+entropy. If even that candidate's root lies beyond the `ρ_max` face, so does
+every other's: on the face `φ = tanh w − V` rises with `s`, since `z` does.
+The scan then stops there, unbracketed, rather than solve the rest.
 """
-function bracket_scan(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, w_max::T,
+function bracket_scan(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, w_lo::T, w_max::T,
                       τ_floor_rel::T, n_scan::Integer, s_in::T, w_in::T, w_seed0::T, u_seed0::T,
                       max_iter_1d::Integer, tol::T, ::Val{NMAX}=Val(BRACKET_SCAN_MAX)) where {S,T,NMAX}
     n = clamp(Int(n_scan), 4, NMAX)
 
-    ρ_a = D                    # at rest
+    ρ_a = D / cosh(w_lo)       # at rest, or on the ρ_max face
     ρ_b = D / cosh(w_max)      # at the rapidity cap
 
     ext_a = srange_extended(eos, ρ_a, yₑ)
@@ -425,7 +512,7 @@ function bracket_scan(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_per
             # A multiplicative offset degenerates at or below zero entropy,
             # which is legitimate on tables whose entropy axis reaches zero.
             # Fall back to a window sized by the local physical span.
-            ρ_in = D / cosh(clamp(w_in, zero(T), w_max))
+            ρ_in = D / cosh(clamp(w_in, w_lo, w_max))
             sr_in = srange(eos, ρ_in, yₑ)
             half_width = T(0.6) * (sr_in.s_max - sr_in.s_min)
             lo = clamp(s_in - half_width, s_ext_lo, s_ext_hi)
@@ -444,11 +531,15 @@ function bracket_scan(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_per
 
         w_seed, u_seed = w_seed0, u_seed0
         for i in 1:nc
-            r, _ = inner_solve_w(eos, D, τ, yₑ, S_par, S_perp, B², s_cand[i], w_max, τ_floor_rel,
+            r, _ = inner_solve_w(eos, D, τ, yₑ, S_par, S_perp, B², s_cand[i], w_lo, w_max, τ_floor_rel,
                                  w_seed, u_seed, max_iter_1d, tol)
             g_cand[i] = r.f2
             w_seed = r.w
             u_seed = r.pt.u_solved
+            # Candidate 1 is s_ext_lo, the least entropy of all.
+            if i == 1 && w_lo > zero(T) && r.w == w_lo && r.f1 >= zero(T) && !f1_converged(r, tol)
+                return BracketScanResult{T}(false, s_cand[1], s_cand[1], s_cand[1])
+            end
         end
 
         sort_scan!(s_cand, g_cand, nc)
@@ -553,7 +644,7 @@ function seed_z_solve(D::T, E::T, p::T, S_perp::T, B²::T, n_iter::Integer) wher
 end
 
 """
-    cold_seed(eos, D, τ, yₑ, S_par, S_perp, B², w_max, n_pass, n_s_iter)
+    cold_seed(eos, D, τ, yₑ, S_par, S_perp, B², w_lo, w_max, n_pass, n_s_iter)
 
 Manufacture a starting point with no prior iterate.
 
@@ -561,9 +652,10 @@ Every step is an exact relation and the only lagged quantity is the pressure,
 which starts at zero: energy gives the enthalpy density, momentum gives the
 rapidity, the energy identity gives the internal energy, and the guaranteed
 monotone entropy solve gives the entropy. Being field-aware is what makes this
-work on magnetized states, where a hydrodynamic seed is badly wrong.
+work on magnetized states, where a hydrodynamic seed is badly wrong. Like every
+iterate, each pass keeps its rapidity in `[w_lo, w_max]`, inside the density box.
 """
-function cold_seed(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, w_max::T,
+function cold_seed(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::T, B²::T, w_lo::T, w_max::T,
                    n_pass::Integer, n_s_iter::Integer) where {S,T}
     E = τ + D
     S_perp_pos = S_perp > zero(T) ? S_perp : zero(T)
@@ -587,7 +679,7 @@ function cold_seed(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::
         # V at or above the cap means the lagged pressure is not yet consistent
         # with a state inside the rapidity bound; report the cap and let the
         # next pass fix it.
-        w = V < V_max ? clamp(atanh(V), zero(T), w_max) : w_max
+        w = V < V_max ? clamp(atanh(V), w_lo, w_max) : w_max
 
         coshw = cosh(w)
         sinhw = sinh(w)
@@ -648,6 +740,10 @@ fallback is the safety net for the remainder.
 
 A failure still returns a fully populated best-effort state.
 
+The search stays inside the EOS's density box: no iterate has `ρ > ρ_max`. A
+state whose solution lies above the box is therefore not solved but reported as
+`failed_no_bracket`, with its best iterate at or below the face.
+
 This is [`con2prim_start`](@ref) followed, where needed, by
 [`con2prim_finish`](@ref), and gives the same result bit for bit. On a GPU the
 two stages can run as separate kernels.
@@ -691,13 +787,17 @@ function con2prim_start(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOp
     u_start = u_guess
 
     if cold_s || cold_w
-        seed = cold_seed(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², opts.w_max, opts.seed_passes,
+        w_lo = w_floor(eos, in.D, opts.w_max)
+        seed = cold_seed(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², w_lo, opts.w_max, opts.seed_passes,
                          opts.seed_s_iters)
         cold_s && (s = seed.s)
-        cold_w && (w = clamp(seed.w, zero(T), opts.w_max))
+        w = clamp(cold_w ? seed.w : w, w_lo, opts.w_max)
         # The seed's converged temperature is also the best available warm start
         # for the first evaluation.
         isnan(u_start) && (u_start = seed.u)
+    elseif !above_floor(eos, in.D, w)
+        # Nor for the floor's acosh, if the guess is already inside the box.
+        w = max(w, w_floor(eos, in.D, opts.w_max))
     end
 
     r = residuals(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², s, w, u_start, opts.τ_floor_rel)
@@ -736,8 +836,10 @@ function con2prim_start(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOp
         ds = clamp(ds, -ds_max, ds_max)
         dw = clamp(dw, -one(T), one(T))
 
-        w_raw = w + dw
-        w_next = w_raw < zero(T) ? tiny_w(T) : clamp(w_raw, zero(T), opts.w_max)
+        # Recomputed rather than carried, so a warm start that never steps never
+        # computes it. A flag saying whether it was known yet, live across the
+        # residual's evaluation, cost the fused kernel 2% on an H200.
+        w_next = clamp_w(w + dw, w_floor(eos, in.D, opts.w_max), opts.w_max)
         s_next = s + ds
         u_next = r.pt.u_solved
         r_next = residuals(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², s_next, w_next, u_next,
@@ -779,18 +881,19 @@ function con2prim_finish(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimO
     r = residuals(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², st.s, st.w, st.u, opts.τ_floor_rel)
     st.converged && return fill_out(r, yₑ, C2PResult.converged_newton, iters, Int32(0))
     r_best = r
+    w_lo = w_floor(eos, in.D, opts.w_max)
 
     # --- Nested one-dimensional fallback ---------------------------------
     s_anchor = r_best.s
     w_anchor = r_best.w
     u_anchor = r_best.pt.u_solved
 
-    scan = bracket_scan(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², opts.w_max, opts.τ_floor_rel,
+    scan = bracket_scan(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², w_lo, opts.w_max, opts.τ_floor_rel,
                         opts.bracket_scan, s_anchor, w_anchor, w_anchor, u_anchor, opts.max_iter_1d,
                         opts.tol)
 
     if !scan.bracketed
-        best, _ = inner_solve_w(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², scan.s_best, opts.w_max,
+        best, _ = inner_solve_w(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², scan.s_best, w_lo, opts.w_max,
                                 opts.τ_floor_rel, w_anchor, u_anchor, opts.max_iter_1d, opts.tol)
         # Report whichever of the scan's best point and the Newton's best
         # iterate sits closer to a root. The scan point satisfies the momentum
@@ -804,9 +907,9 @@ function con2prim_finish(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimO
 
     # Re-solve at the chosen endpoints from the original warm start, since the
     # scan returns only its winning entropies and not their residuals.
-    r_lo, _ = inner_solve_w(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², scan.s_lo, opts.w_max,
+    r_lo, _ = inner_solve_w(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², scan.s_lo, w_lo, opts.w_max,
                             opts.τ_floor_rel, w_anchor, u_anchor, opts.max_iter_1d, opts.tol)
-    r_hi, _ = inner_solve_w(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², scan.s_hi, opts.w_max,
+    r_hi, _ = inner_solve_w(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², scan.s_hi, w_lo, opts.w_max,
                             opts.τ_floor_rel, r_lo.w, r_lo.pt.u_solved, opts.max_iter_1d, opts.tol)
 
     slo, shi = scan.s_lo, scan.s_hi
@@ -862,7 +965,7 @@ function con2prim_finish(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimO
         end
         prev_s_next = s_next
 
-        r_next, _ = inner_solve_w(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², s_next, opts.w_max,
+        r_next, _ = inner_solve_w(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², s_next, w_lo, opts.w_max,
                                   opts.τ_floor_rel, w_seed, u_seed, opts.max_iter_1d, opts.tol)
         w_seed, u_seed = r_next.w, r_next.pt.u_solved
         r_cur = r_next
@@ -907,8 +1010,7 @@ function con2prim_finish(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimO
         ds = (b * r_cur.f2 - d * r_cur.f1) / det
         dw = (c * r_cur.f1 - a * r_cur.f2) / det
         s_try = r_cur.s + ds
-        w_raw = r_cur.w + dw
-        w_try = w_raw < zero(T) ? tiny_w(T) : clamp(w_raw, zero(T), opts.w_max)
+        w_try = clamp_w(r_cur.w + dw, w_lo, opts.w_max)
         r_try = residuals(eos, in.D, in.τ, yₑ, in.S_par, in.S_perp, in.B², s_try, w_try,
                           r_cur.pt.u_solved, opts.τ_floor_rel)
         n_try = scaled_norm(r_try)

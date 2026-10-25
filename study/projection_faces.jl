@@ -213,8 +213,8 @@ function study_state(v, st, opts, ws)
     gvalid = falses(length(ss))
     w_seed, u_seed = 0.0, NaN
     for (j, s) in pairs(ss)
-        r, _ = E.inner_solve_w(v, D, c.τ, ye, c.S_par, c.S_perp, B², s, opts.w_max, opts.τ_floor_rel, w_seed,
-                               u_seed, opts.max_iter_1d, opts.tol)
+        r, _ = E.inner_solve_w(v, D, c.τ, ye, c.S_par, c.S_perp, B², s, E.w_floor(v, D, opts.w_max), opts.w_max,
+                               opts.τ_floor_rel, w_seed, u_seed, opts.max_iter_1d, opts.tol)
         τm[j] = r.f2 * denom0 + c.τ
         sr = srange(v, r.ρ, ye)
         gvalid[j] = E.f1_converged(r, opts.tol) && ρ_min <= r.ρ <= ρ_max && r.w <= W_CAP && sr.s_min <= s <= sr.s_max
