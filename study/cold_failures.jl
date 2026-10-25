@@ -36,8 +36,8 @@ function sample_valid(v, rng; w_max_sample=6.0, sigma_max=1e4, margin=0.05)
     return (ρ=ρ, s=s, yₑ=yₑ, w=w, B²=(b2_zero ? 0.0 : σ * ρ * pt.h), cos_vB=-1 + 2rand(rng), u=pt.u_solved)
 end
 
-inner(v, c, ye, s, opts) = E.inner_solve_w(v, c.D, c.τ, ye, c.S_par, c.S_perp, c.B², s, opts.w_max, opts.τ_floor_rel,
-                                           0.0, NaN, opts.max_iter_1d, opts.tol)[1]
+inner(v, c, ye, s, opts) = E.inner_solve_w(v, c.D, c.τ, ye, c.S_par, c.S_perp, c.B², s, E.w_floor(v, c.D, opts.w_max),
+                                           opts.w_max, opts.τ_floor_rel, 0.0, NaN, opts.max_iter_1d, opts.tol)[1]
 
 """Bisection in s on f₂ at the inner root; `why` is :conv, :nobracket, :collapsed or :maxiter."""
 function bisect(v, c, ye, a, b, opts; n=200)
@@ -48,7 +48,13 @@ function bisect(v, c, ye, a, b, opts; n=200)
         m = (a + b) / 2
         r = inner(v, c, ye, m, opts)
         abs(r.f2) <= opts.tol && E.f1_converged(r, opts.tol) && return (; ok=true, why=:conv, r)
-        sign(r.f2) == sign(ra.f2) ? (a, ra = m, r) : (b, rb = m, r)
+        # Not `cond ? (a, ra = m, r) : ...`: in parentheses that builds a
+        # NamedTuple and assigns nothing, which left the bracket fixed.
+        if sign(r.f2) == sign(ra.f2)
+            a, ra = m, r
+        else
+            b, rb = m, r
+        end
         a < m < b || return (; ok=E.f1_converged(r, opts.tol), why=:collapsed, r)
     end
     return (; ok=false, why=:maxiter, r)

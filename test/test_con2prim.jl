@@ -233,6 +233,70 @@ end
         @test maxs < 1e-11
     end
 
+    @testset "the search stays inside the density box" begin
+        # The box's top, widened by the projection's slack so that a state
+        # written onto that face solves again.
+        ρ_max = exp10(v.x_hi)
+        ρ_top = ρ_max * (1 + E.face_slack(Float64))
+        @test E.w_floor(v, 0.5ρ_max, opts.w_max) === 0.0
+        @test E.w_floor(v, ρ_top, opts.w_max) === 0.0
+        @test 3ρ_max / cosh(E.w_floor(v, 3ρ_max, opts.w_max)) ≈ ρ_top rtol = 1e-14
+        @test E.w_floor(v, ρ_max * 1e10, opts.w_max) == opts.w_max
+
+        # above_floor, which lets a warm start skip the floor's acosh, may say no
+        # above the floor but never yes below it.
+        @test E.above_floor(v, ρ_top, 0.0)
+        @test E.above_floor(v, 3ρ_max, 1.1 * acosh(3))
+        @test !E.above_floor(v, 3ρ_max, 0.9 * acosh(3))
+        rng_f = StableRNG(5)
+        wrong = count(1:10_000) do _
+            D = ρ_max * exp10(3rand(rng_f) - 1)
+            w = opts.w_max * rand(rng_f)
+            return E.above_floor(v, D, w) && w < E.w_floor(v, D, opts.w_max)
+        end
+        @test wrong == 0
+
+        # A state above the box: unconfined, the inner solve finds it; confined,
+        # f₁ ≥ 0 on the ρ_max face, and the solve returns the face after testing
+        # it once instead of bisecting its budget away.
+        for (dx, w, frac) in ((0.5, 2.0, 0.5), (0.2, 1.0, 0.2), (1.0, 3.0, 0.9))
+            ρ = exp10(v.x_hi + dx)
+            sr = srange(v, ρ, 0.3)
+            s = sr.s_min + frac * (sr.s_max - sr.s_min)
+            cin, _ = forward(ρ, s, 0.3, w, 0.0, 0.0)
+            w_lo = E.w_floor(v, cin.D, opts.w_max)
+            inner(lo) = E.inner_solve_w(v, cin.D, cin.τ, 0.3, cin.S_par, cin.S_perp, cin.B², s, lo, opts.w_max,
+                                        opts.τ_floor_rel, 3.0, NaN, opts.max_iter_1d, opts.tol)
+            r, iters = inner(w_lo)
+            @test r.w == w_lo && r.f1 > 0
+            @test iters <= 3
+            @test inner(0.0)[1].ρ ≈ ρ rtol = 1e-10
+            # So con2prim does not solve it, and reports it at the face.
+            out = con2prim(v, cin, opts)
+            @test out.result === E.C2PResult.failed_no_bracket
+            @test out.ρ <= ρ_top * (1 + 1e-12)
+        end
+
+        # A fast state just inside the box still solves, cold and warm.
+        rng = StableRNG(17)
+        maxρ = 0.0
+        for _ in 1:40
+            ρ = exp10(v.x_hi - 0.2rand(rng))
+            sr = srange(v, ρ, 0.3)
+            s = sr.s_min + (sr.s_max - sr.s_min) * (0.05 + 0.9rand(rng))
+            w = 2 + 4rand(rng)
+            cin, pt = forward(ρ, s, 0.3, w, rand(rng) < 0.5 ? 0.0 : ρ * 10.0^(-2 + 3rand(rng)), 2rand(rng) - 1)
+            @test cin.D > ρ_max
+            # The last guess lies above the box, so the floor lifts it.
+            for out in (con2prim(v, cin, opts), con2prim(v, cin, opts, s * (1 + 1e-3), w + 1e-3, pt.u_solved),
+                        con2prim(v, cin, opts, s * (1 + 1e-3), 0.0, pt.u_solved))
+                @test out.result === E.C2PResult.converged_newton || out.result === E.C2PResult.converged_fallback
+                maxρ = max(maxρ, abs(out.ρ - ρ) / ρ)
+            end
+        end
+        @test maxρ < 1e-9
+    end
+
     @testset "bracket_scan never returns an empty bracket" begin
         # The scan's candidates include both edges of the physical window
         # twice. With the root on an edge the two copies' solves can disagree
@@ -243,9 +307,9 @@ end
             s = getfield(srange(v, ρ, yₑ), edge)
             cin, pt = forward(ρ, s, yₑ, 0.0, 0.0, 0.0)
             for u in (NaN, pt.u_solved - 1e-11, pt.u_solved + 1e-11)
-                scan = E.bracket_scan(v, cin.D, cin.τ, yₑ, cin.S_par, cin.S_perp, cin.B², opts.w_max,
-                                      opts.τ_floor_rel, opts.bracket_scan, s, 0.0, 0.0, u, opts.max_iter_1d,
-                                      opts.tol)
+                scan = E.bracket_scan(v, cin.D, cin.τ, yₑ, cin.S_par, cin.S_perp, cin.B²,
+                                      E.w_floor(v, cin.D, opts.w_max), opts.w_max, opts.τ_floor_rel,
+                                      opts.bracket_scan, s, 0.0, 0.0, u, opts.max_iter_1d, opts.tol)
                 scan.bracketed && !(scan.s_lo < scan.s_hi) && (nempty += 1)
             end
         end
@@ -260,8 +324,8 @@ end
             ρ, s, yₑ, w, B², cos_vB = random_state(rng; wmax=2.0)
             B² = ρ * 10.0^(-1 + 2rand(rng))
             cin, _ = forward(ρ, s, yₑ, w, B², cos_vB)
-            seed = E.cold_seed(v, cin.D, cin.τ, yₑ, cin.S_par, cin.S_perp, cin.B², opts.w_max,
-                               opts.seed_passes, opts.seed_s_iters)
+            seed = E.cold_seed(v, cin.D, cin.τ, yₑ, cin.S_par, cin.S_perp, cin.B², E.w_floor(v, cin.D, opts.w_max),
+                               opts.w_max, opts.seed_passes, opts.seed_s_iters)
             @test isfinite(seed.s) && isfinite(seed.w)
             @test abs(seed.s - s) / max(abs(s), 1) < 0.2
             @test seed.w >= 0

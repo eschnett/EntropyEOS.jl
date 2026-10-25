@@ -154,7 +154,9 @@ parameter sets give a different EOS. Use the paper's own fits, and note that its
 Table II misprints the second crust break (`1.826e6` should be `1.826e8`).
 The classic form's jumps in `cs²` would put jumps into con2prim's Jacobian, which
 the table path is C² precisely to avoid. Both EOSs are closed-form, so
-`evaluate` neither clamps nor iterates; the box only sets flags. The terms are
+`evaluate` neither clamps nor iterates; the box only sets flags, and ends
+con2prim's search at its top ([Deliberate deviations](#deliberate-deviations-from-the-c)),
+which matters because the causality check covers only the box. The terms are
 written as one `exp` of a sum of logs, and each polytropic piece is scaled to a
 reference density, so that cgs parameters (`ρ^Γ ~ 1e45`) do not overflow
 `Float32` intermediates. Validation, including a causality check over the box,
@@ -393,7 +395,10 @@ faces.
 z·(1 − cs²)·tanh w gives dφ/dw·cosh² w ≥ 1 − cs²·tanh² w for any B², so at
 fixed s every crossing rises, and the root is unique, wherever cs²·v² < 1. The
 solve at fixed s has the same multiple roots there (see [Open items](#open-items)),
-and they need fast flow through an acausal part of the table. Only (c), at most
+and they need fast flow through an acausal part of the table. The extension
+above the box is acausal as well, and supplied extra roots of its own until
+con2prim's search was kept inside the box
+([Deliberate deviations](#deliberate-deviations-from-the-c)). Only (c), at most
 0.4% of states, comes from the edge's density dependence. Where φ has several
 roots, the face find returns whichever root its bracketed find reaches, as
 `inner_solve_w` does; no rule picks among them
@@ -402,21 +407,28 @@ not need one.
 
 Where the inner root is not unique, level 1 cannot keep its contract: a cold
 start can fail, and the edge solves of the diagnosis can land on another root,
-so that a valid state is projected onto a face. Measured on 2026-10-23 by
+so that a valid state is projected onto a face. Measured on 2026-10-24 by
 `study/cold_failures.jl`: of 20,000 valid states per table (the sampling of
-`test/test_real_tables.jl`), a cold start failed on 4 (LS220), 9 (SRO LS220),
+`test/test_real_tables.jl`), a cold start failed on 5 (LS220), 9 (SRO LS220),
 10 (DD2, either version) and 7 (SFHo), all in region (a) or (b); a warm start
-failed on 2, both DD2. Of these 30 cold failures (counting DD2 once),
-`con2prim_safe` projects 22 onto a face — all 13 of LS220's and SRO LS220's onto
+failed on 2, both DD2. Of these 31 cold failures (counting DD2 once),
+`con2prim_safe` projects 23 onto a face — all 14 of LS220's and SRO LS220's onto
 ρ_max, which is the top of the table they lie at — and returns 8 as
-`NOT_CONVERGED`. (With the C++'s cold seed there were 37
-([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)); before the con2prim
-fixes of [Deliberate deviations](#deliberate-deviations-from-the-c) there were
-41, of which 1.x's diagnosis found 29 outside the entropy window and sent 12 to
-the atmosphere.) A bisection in s, bracketed by either window, recovered none,
-because G jumps between roots. Regions (a) and (b) are wrong physics, to be
-fixed by repairing the tables, so this is accepted as a limitation
-([Open items](#open-items)).
+`NOT_CONVERGED`. A bisection in s, bracketed by either window, recovered none,
+because G jumps between roots.
+
+That sampling keeps 5% inside each end of the density range, so it leaves out
+most of region (a). Over the whole box, cold solves fail on 2.1% of LS220's
+and 2.2% of SRO LS220's valid states and on 0.3% of SFHo's, and on every real
+table a further 0.6–0.8% converge on another exact solution than the one that
+went in, which no flag reports ([Deliberate deviations](#deliberate-deviations-from-the-c)
+has the counts). Regions (a) and (b) are wrong physics, to be fixed by
+repairing the tables, so this is accepted as a limitation
+([Open items](#open-items)). `eos_repair`'s causal cap does fix (a): on LS220
+repaired with it, no cold failure is left over the whole box, and 17 states
+converge on another solution. It does not reach (b), whose violations are not
+anchored at ρ_max: the "DD2 repaired" table measured here had its causal-cap
+stage cap no node.
 
 #### The contract
 
@@ -449,19 +461,19 @@ Where the inner root is unique:
   on a second root inside the window: the root is not unique there.
 
 A re-solve without a guess returns a state on a face only to its conditioning.
-Measured on 2026-10-23 by `study/cold_resolve.jl`: 5,000 states per table,
+Measured on 2026-10-24 by `study/cold_resolve.jl`: 5,000 states per table,
 pushed off a valid state by up to four decades in D, τ and S, each projected
 output re-solved cold. "Excess" is how far the re-solved state lies past its
 face, relative as for the slack:
 
 | table | excess p99 | max | > 4·tol (old slack) | > 10⁻⁷ | re-flagged cold |
 | --- | --- | --- | --- | --- | --- |
-| synthetic | 5·10⁻⁹ | 6·10⁻⁷ | 770 of 4,638 | 1 | 1 |
-| LS220 | 2·10⁻⁹ | 2·10⁻⁵ | 271 of 3,899 | 23 | 140 |
-| SRO LS220 | 3·10⁻⁸ | 4·10⁻³ | 313 of 3,899 | 30 | 148 |
-| DD2 | 4·10⁻³ | 0.8 | 479 of 4,069 | 127 | 134 |
-| DD2 repaired | 4·10⁻³ | 0.8 | 492 of 4,068 | 127 | 135 |
-| SFHo | 4·10⁻⁹ | 0.7 | 402 of 3,998 | 30 | 63 |
+| synthetic | 5·10⁻⁹ | 6·10⁻⁷ | 771 of 4,638 | 1 | 1 |
+| LS220 | 2·10⁻⁹ | 2·10⁻⁵ | 278 of 3,901 | 25 | 140 |
+| SRO LS220 | 3·10⁻⁸ | 4·10⁻⁶ | 314 of 3,900 | 31 | 148 |
+| DD2 | 4·10⁻³ | 0.8 | 477 of 4,067 | 127 | 136 |
+| DD2 repaired | 4·10⁻³ | 0.8 | 490 of 4,065 | 127 | 138 |
+| SFHo | 4·10⁻⁹ | 0.7 | 403 of 3,998 | 30 | 63 |
 
 With a guess at the output none is re-flagged. Most of the excess is the
 solver's conditioning, which the slack of 10⁻⁷ covers; the tail is not. Where
@@ -515,7 +527,7 @@ The C++ uses the same numbering.
 No heap allocation, no `throw`, no `@fastmath`, no closures, no `String`; array
 reads `@inbounds`, small helpers `@inline`. Kernel-side structs stay `isbits`;
 a NaN sentinel is not replaced with `Union{Nothing,T}`, because NaN is
-load-bearing and flows through arithmetic. Five consequences worth naming:
+load-bearing and flows through arithmetic. Six consequences worth naming:
 
 - **Domain-safe math.** `log10`, `sqrt` and `floor(Int, ·)` throw in Julia where
   C returns NaN or is merely unspecified. `core/defs.jl` provides `safe_log10`,
@@ -554,11 +566,23 @@ load-bearing and flows through arithmetic. Five consequences worth naming:
   bit. The hand-off is not the iterate (`Residuals` is ~280 bytes) but the
   `(s, w)` and warm start that reproduce it: `residuals` is pure, so the second
   stage rebuilds it exactly, for one extra evaluation on a pending state. On an
-  H200 this made cold `con2prim` 1.5–2.7 times faster on the real tables, and
+  H200 this made cold `con2prim` 1.8–2.7 times faster on the real tables, and
   the device's two-kernel results are bitwise those of its fused kernel
   ([HISTORY](HISTORY.md#two-stages)). The package launches no kernels:
   `study/device_parity.jl` and the GPU testset show the launch and the
   compaction.
+- **Register pressure.** On an H200 every `con2prim` kernel uses the full 255
+  registers per thread and spills: 3.2 KB of local memory for the first stage
+  alone, 8.5 KB fused. The fused kernel runs a warm call 6–9% slower than the
+  first stage alone, although its fallback never runs, and its time moves by
+  ±2% with rewrites that leave the arithmetic bit for bit unchanged. So a
+  change to the hot path is timed on the first stage, where such effects are
+  smaller. One such change is the density floor of the confined search:
+  `con2prim_start` skips its `acosh` when `above_floor`, a polynomial lower
+  bound on cosh, already places the warm start inside the box, and the Newton
+  recomputes it each step rather than carry it. That made the warm first stage
+  3–5% faster; the fused kernel did not change
+  ([HISTORY](HISTORY.md#two-stages)).
 
 ## Deliberate deviations from the C++
 
@@ -596,6 +620,90 @@ solves of states on an edge of the entropy window converge, where the C++ fails
 - **An endpoint within tolerance is a bracket.** After the fallback re-solves
   the scan's interval, an endpoint whose residual meets the tolerance no longer
   fails the sign test.
+
+One change keeps the search inside the density box. The C++ brackets the
+rapidity on [0, w_max], so at fixed s its inner solve sweeps ρ = D/cosh w up
+to D = ρW: for a fast state near the top of the table, far above the box. The
+table is extended there only so that an evaluation stays finite. Its x_hi tail
+is acausal (cs² ≈ 1.1 just above ρ_max even after a causal repair) and frozen
+beyond x_ext_hi = x_hi + 0.44, where `locate` clamps the density; the hybrid's
+last polytrope reaches cs² = 1.26 at 1.5 ρ_max. A crossing of φ can fall only
+where cs²·tanh² w > 1, so the inner solve found extra roots there, and the
+fallback failed on states whose solution inside the box was unique. Here every
+iterate keeps w ≥ `w_floor` = acosh(D/ρ_max), the cold seed's passes, the
+Newton, the inner solve and the scan alike, and the EOS is never evaluated
+above the box:
+
+- The inner solve, where it would bisect towards the face with the root below
+  its iterate, tests the face instead, once, and stops there if the root lies
+  beyond it.
+- The scan solves its least entropy first. On the face φ rises with s, since z
+  does, so if that root lies beyond the face every other does too, and the
+  scan stops unbracketed.
+
+Both reuse their loop's own evaluation ([Discipline in `core/`](#discipline-in-core));
+the Metal kernels grew by 49 lines of IR. ρ_max is widened by `face_slack`, so
+that a state `con2prim_safe` writes onto that face solves again: `acosh` of its
+D/ρ_max can round to above its own rapidity. The low-density side stays open:
+that extension is causal by design, and converged states legitimately live
+there.
+
+Measured on 2026-10-24 against the previous commit, on the same 32,768 valid
+states per EOS over the whole density box (`study/device_parity.jl`'s
+sampling), solved cold, single-threaded on the host. States with D ≤ ρ_max are
+untouched, bit for bit. For the others:
+
+| EOS | states with D > ρ_max | failed | converged on another state | µs per such state |
+| --- | --- | --- | --- | --- |
+| SLy hybrid | 3,531 | 178 → 0 | 0 → 0 | 3.4 → 3.1 |
+| LS220, causally repaired by `eos_repair` | 2,512 | 84 → 0 | 142 → 17 | 58 → 21 |
+| LS220 | 2,512 | 656 → 679 | 225 → 202 | 36 → 14 |
+| SRO LS220 | 2,512 | 719 → 723 | 200 → 194 | 31 → 17 |
+| SFHo | 2,460 | 52 → 79 | 132 → 100 | 25 → 8.5 |
+| DD2, either version | 2,334 | 0 → 0 | 0 → 0 | 34–36 → 35–39 |
+| ideal gas, synthetic table | 4,127; 3,282 | 0 → 0 | 0 → 0 | 2.6 → 2.5; 4.2 → 4.1 |
+
+Over all states, cold solves got 18–32% cheaper on the four tables with
+failures, and stayed within the noise (±5%) elsewhere. The Newton converges on
+the same states, to within 2 per table, cold and from a guess 1e-3 off (the
+repaired LS220 gains 23 cold), and in the same number of steps (±0.1). From a
+guess 10% off it converges on up to 22 more states per table, and on up to 9
+fewer (the synthetic table), which the fallback then solves. What changed is
+the fallback: where the
+box is causal its bracket holds a unique root again. Where it is not, at
+the top of LS220, SRO LS220 and SFHo (region (a) of
+[Where the answer is not unique](#where-the-answer-is-not-unique)), a state
+that converged on a root above the box, which `con2prim_safe` could not use,
+now reports failure instead.
+
+A state whose solution lies above the box is not solved: `con2prim` reports
+`failed_no_bracket` with its iterate at or below the face, and `con2prim_safe` decides
+it by its diagnosis, as it did a converged root outside the range. On the
+ideal gas and the synthetic table, whose harmless extension let the Newton find
+that root in 2–4 µs, this costs 18 µs per such state; on the real tables, where
+the search used to end in the fallback anyway, it is 5–9 times cheaper.
+
+On an H200 (2026-10-25, `study/device_parity.jl`, 2²⁰ states per table) every
+Float64 gate still passes, and the Float32 gates that failed before fail on the
+same tables. At Float64 in one kernel, cold `con2prim` runs 2.1–3.4 times
+faster on LS220, SRO LS220 and SFHo (5.1, 4.8 and 4.1 million states per
+second, from 1.5, 2.3 and 1.4), `con2prim_safe` 1.6–2.5 times, and DD2 and the
+synthetic table are unchanged. As many states reach the fallback as before,
+2.2% on LS220, but the fallback costs less. Device and host now agree on the
+cold result for 99.999% of LS220's states, up from 99.989%. Warm `con2prim`
+in one kernel costs 2–4% more at Float64 and is within 1% at Float32; its first
+stage alone is within 2% of before, either way
+([Discipline in `core/`](#discipline-in-core)). Float32
+follows the Float64 picture. Cold failures rise by 0.7–0.9% of the states on
+LS220 and SRO LS220 and by under 0.1% on DD2 and SFHo. A host run of 2¹⁸ states
+per table found that 99.9% of the lost states had converged on another state,
+most of them on LS220's acausal top at the foot of the entropy extension. The
+number solved to the input itself changed by −5 to +25 per table.
+
+The adapter design's rule for out-of-bounds handling, extension plus flag and
+never a hard clamp, is about an EOS evaluated at a clamped point, whose zero
+derivatives stall Newton. It does not cover a search that evaluates the EOS
+only inside the box ([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)).
 
 One numerical change is for speed. Each pass of the cold seed recovers the
 entropy from an internal energy. The C++ does that by a safeguarded Newton in
@@ -854,23 +962,27 @@ Where the two can be compared, they agree.
   Inlining `apply_policy` or `pol_package`, and raising the stack limit to 64 kB,
   did not help. Until it is understood, call the two levels from separate
   kernels on CUDA. Metal is not affected.
-- `inner_solve_w`'s docstring claims a unique root at fixed s. That needs
-  cs²·v² < 1 along the path, which the real tables violate in places: every one
-  has cs² > 1 near its top density, at all temperatures (LS220 1.3–1.4, DD2
-  just above 1), and DD2 and SFHo have spikes at their hottest edge (cs² 4.3 at
-  ρ ≈ 10⁷ in DD2, 1.17 within ~0.01 in log T of T_max at ρ ≈ 5·10¹²). There the
-  inner solve can have
-  several roots, in 0–3.7% of states sampled with w uniform in [0, 4], and
-  returns whichever it reaches; for 0.35–1.5% the sampled root is not the
-  lowest (measured by `study/projection_faces.jl` and
-  `study/root_certificate.jl`, 2026-10-22). A causally repaired table would
-  remove this; table repair is out of scope ([Scope](#scope)). On a cold start
-  it makes the solve fail, or the projection's diagnosis misclassify a valid
-  state, in a few in 10,000 valid states
-  ([Where the answer is not unique](#where-the-answer-is-not-unique)). A possible remedy,
-  not proposed: on the failure path only, follow each root through an ordered
-  sweep in s, seeding every inner solve from its neighbour, and diagnose and
-  solve on those roots.
+- `inner_solve_w`'s root is unique only where cs²·v² < 1 along its path,
+  which since the search stays in the box means inside the box. The real
+  tables violate that in places: every one has cs² > 1 near its top density,
+  at all temperatures (LS220 1.3–1.4, DD2 just above 1), and DD2 and SFHo have
+  spikes at their hottest edge (cs² 4.3 at ρ ≈ 10⁷ in DD2, 1.17 within ~0.01 in
+  log T of T_max at ρ ≈ 5·10¹²). There the inner solve can have several roots,
+  in 0–3.7% of states sampled with w uniform in [0, 4], and returns whichever
+  it reaches; for 0.35–1.5% the sampled root is not the lowest (measured by
+  `study/projection_faces.jl` and `study/root_certificate.jl`, 2026-10-22,
+  before the search was confined). A causally repaired table would remove
+  this; table repair is out of scope ([Scope](#scope)). On a cold start it
+  makes the solve fail, or the projection's diagnosis misclassify a valid
+  state ([Where the answer is not unique](#where-the-answer-is-not-unique)). A
+  possible remedy, not proposed: on the failure path only, follow each root
+  through an ordered sweep in s, seeding every inner solve from its neighbour,
+  and diagnose and solve on those roots.
+- **(open)** A `ProjectionOptions` ceiling above the EOS's box is not reached
+  by a solve, since con2prim searches only inside the box. A state valid for
+  such a projection but above the box then ends `NOT_CONVERGED`. No caller sets
+  one; lowering `ρ_max` to the box's top in `proj_ρ_max` would make the state
+  `ρ_CEILED` instead.
 - **(open)** On a table's cold edge the energy residual cannot always meet the
   tolerance. `eval_at` forms U as (1 + Û)/κ − 1, so U is resolved to
   eps(1 + U) absolutely, and at rest f₂ to about eps/U: 1.2e-12 on the

@@ -7,7 +7,8 @@
 #
 # Both are closed-form potentials U(ρ, s), so `evaluate` needs no inner solve,
 # no clamping and no extension: the formulas hold everywhere, and the box only
-# decides which flags are set. κ = 1, so ρ★ = ρ, and Yₑ enters only the bounds.
+# decides which flags are set, and where con2prim's search ends. κ = 1, so
+# ρ★ = ρ, and Yₑ enters only the bounds.
 # The keyword constructors, which validate, live in host/analytic_eos.jl.
 
 """
@@ -108,7 +109,8 @@ Every argument is a required keyword, in any consistent unit system (κ = 1, so
     `0 < s_min`. The bracket scan works in relative steps of `s`, so choose
     `s_ref` to keep `s` of order 1 to 10, as for an entropy in `k_B` per baryon.
   * `ρ_bounds = (ρ_min, ρ_max)` sets the policy's default atmosphere and
-    density ceiling.
+    density ceiling. `con2prim` never searches above `ρ_max`, so a state whose
+    density lies above it is not solved.
   * `yₑ_bounds` only bounds the passive `Yₑ`; the EOS does not depend on it.
 
 The constructor throws an `ArgumentError` for invalid parameters, including any

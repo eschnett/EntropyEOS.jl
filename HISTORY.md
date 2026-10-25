@@ -302,6 +302,42 @@ which 1,853 end in failure, took 410 ms against the first stage's 82. In
 12–14% of this sampling: w is uniform in [0, 6), and 11.7% of it lies above
 the default cap acosh(100) ≈ 5.30.
 
+2026-10-25. The confined search had made warm Float64 `con2prim` 2–4% slower
+on an H200. In the parity sampling a warm start converges with no Newton step,
+so a warm call is one residual evaluation plus the density floor. A dedicated
+benchmark (CUDA.jl, 40 launches of 2²⁰ states, minimum time, the old and new
+trees and variants alternating in one job on cn113) separated the parts. Times
+in ms, warm, on the synthetic table / DD2 / LS220:
+
+| | fused kernel | first stage alone |
+| --- | --- | --- |
+| before the confined search | 3.04 / 3.42 / 3.44 | 2.80 / 3.14 / 3.20 |
+| confined search | 3.15 / 3.51 / 3.51 | 2.94 / 3.28 / 3.31 |
+| `w_floor` ≡ 0 | 3.10 / 3.47 / 3.47 | |
+| ρ_max precomputed | 3.14 / 3.49 / 3.51 | |
+| floor known by a flag, `acosh` skipped | 3.21 / – / – | |
+| floor recomputed, `acosh` always | 3.20 / 3.57 / 3.57 | 2.93 / 3.20 / 3.22 |
+| floor recomputed, `acosh` skipped (kept) | 3.16 / 3.52 / 3.52 | 2.85 / 3.14 / 3.15 |
+
+Repeats in the same jobs reproduced single entries to 0.3%. Every variant's
+outputs, warm and cold, hashed identical to the confined search's. Findings:
+
+- **Not the `exp10`.** Baking ρ_max in as a literal changed nothing.
+- **The `acosh`, in the first stage.** 7.5–10.4% of the sampled states have
+  D > ρ_max, which puts one in 92–98% of warps. Skipping `acosh` when a
+  polynomial lower bound on cosh already shows the warm start inside the box
+  made the first stage 3–5% faster, within 2% of before either way.
+- **Code generation, in the fused kernel.** Every kernel uses 255 registers
+  and spills, 3.2 KB per thread for the first stage and 8.5 KB fused. With
+  `w_floor` forced to zero the new code is the old algorithm bit for bit (its
+  cold outputs hashed identical to the old tree's), and the fused kernel was
+  still 2.3% slower. No variant moved the fused kernel by more than this
+  noise-like ±2%, in either direction. A call-site `@noinline` on the second
+  stage changed neither time nor local memory.
+
+The kept variant changes no result and leaves cold times unchanged; it helps
+the first stage, which the two-kernel form runs over every state.
+
 ## Deliberate deviations from the C++
 
 2026-10-23. Fixed cold `con2prim` failing on states on an edge of the entropy
@@ -475,6 +511,162 @@ The throughput table it superseded, H200, LS220, millions of states per second:
 | mixed | 370 | 0.9 | 335 |
 | Float32 | 411 | 4.0 | 841 |
 
+2026-10-24. The search stays inside the density box. Found while asking why a
+formulation meant never to fail still did. The test suite and
+`study/cold_failures.jl` sample 5% inside each end of the density range, which
+leaves out the top of the tables. Over the whole box (`study/device_parity.jl`'s
+sampling, 32,768 valid states per table) cold solves failed on 2.0% of LS220's
+states and 2.2% of SRO LS220's, and a further 0.6–0.9% on every real table
+converged on another exact solution than the one that went in. A scratch
+classification put every such state where the EOS along the solver's path is
+acausal (a crossing of φ = 0 can fall only where cs²·tanh² w > 1) or unstable
+(cs² < 0). There were two sources. One is the tables' own acausal regions (a) and (b) of
+[CODE.md](CODE.md#where-the-answer-is-not-unique). The other was the solver's:
+at fixed s its bracket [0, w_max] sweeps ρ = D/cosh w up to D = ρW, and above
+the box the table is extended only to stay finite. Its x_hi tail is acausal (the
+C++'s class E map counts 98–99% of that band acausal), and beyond
+x_ext_hi = x_hi + 0.44 it is frozen at the edge, where evaluations reported cs²
+from −636 to 2,382.
+
+- On the SLy hybrid, causal on its box but not above it (cs² 1.26 at
+  3·10¹⁵), 184 cold solves of 32,768 failed. 178 of them were at the top of the
+  box, with every extra root above ρ_max.
+- On LS220 causally repaired by `eos_repair` (66,419 nodes capped, its acausal
+  corner gone), 84 failed and 142 converged on another state, again with every
+  extra root above ρ_max.
+- A plain nested bisection restricted to ρ ≤ ρ_max found exactly one solution,
+  the input, for all 84 and for 178 of the hybrid's 184.
+- The hybrid's other 6 are cold crust states at W ≈ 100–175 whose thermal
+  energy is 2·10⁻¹³–6·10⁻¹² of τ, below the tolerance, so the conservatives do
+  not determine s. ρ comes back right to 10⁻¹², reported as `failed_no_bracket`.
+  That class is unchanged.
+
+The "DD2 repaired" table measured here did not have its acausal regions
+repaired. Its log shows the causal-cap stage capping no node and leaving all
+131,736 violations, since none is anchored at ρ_max, and every count is the
+same for both versions of DD2.
+
+The adapter design's rule for out-of-bounds handling, "extension plus flag,
+never a hard clamp", had been read as a reason to let the search leave the box.
+It compares an extension with an EOS evaluated at a clamped point, whose zero
+derivatives stall Newton; a search kept inside the box had not been measured.
+A copy of `con2prim` generated from the source, bitwise the package's when
+unconfined, measured it first: the Newton converged on the same states in the
+same number of steps inside the box or not, and only the fallback changed.
+Decided by Erik: confine the seed, the Newton and the fallback at
+w ≥ acosh(D/ρ_max), with a face test in the inner solve and one before the
+fallback's scan, and keep the low-density side.
+
+Settled by the implementation and its measurement:
+
+- ρ_max is widened by `face_slack`. Without it, outputs that `con2prim_safe`
+  had written onto the ρ_max face were no longer fixed points, which the
+  projection tests caught on the synthetic table, on an analytic EOS and on
+  four of the five real tables: `acosh` of their D/ρ_max rounded above their
+  own rapidity, so the confined search excluded their exact root.
+- The face test before the fallback is the scan's first candidate, its least
+  entropy, rather than an evaluation of its own: on the face φ rises with s,
+  so if that root lies beyond the face, every other does. With the inner
+  solve's test it also reuses its loop's evaluation, for the call-site
+  discipline of [CODE.md](CODE.md#discipline-in-core). The Metal kernels grew
+  by 49 lines of IR, to 8,246 (`con2prim`) and 15,798 (`con2prim_safe`), and
+  the GPU testset passes.
+- Without the inner solve's face test, a confined inner solve whose root lay
+  beyond the face bisected its whole budget away onto it, and LS220's states
+  with D > ρ_max took 65% longer instead of less.
+- Rejected: ending the Newton after two iterates held on the face with the
+  root beyond it. It cut the cost of states above the box by 11–70%, but sent
+  764 of 4,127 valid ideal-gas states from a guess 10% off to the fallback,
+  3.4 times as costly: valid states are often held on the face for a few
+  iterates and then recover.
+- Rejected, on the generated copy: confining only the fallback, the Newton free
+  but not accepted above the box. It fixed the same failures, with up to 23
+  fewer Newton successes per table (9 more on the synthetic table). Also
+  rejected: confining at ρ_min as well. It changed no cold result and moved
+  warm ones both ways, and that extension is causal by design and is where
+  converged states legitimately live.
+
+Measured against the previous commit (scratch `measure.jl`, the same states
+solved by both, single-threaded timing); [CODE.md](CODE.md#deliberate-deviations-from-the-c)
+has the cold counts over the whole box:
+
+- Every state with D ≤ ρ_max came back bit for bit, in every sampling and start.
+- From a guess 1e-3 off, the hybrid's 19 failures among states with
+  D > ρ_max went to 0. On LS220, SRO LS220 and SFHo, 11, 13 and 3 states that
+  had converged on another state failed instead.
+- From a guess 10% off, the hybrid's 251 failures and 6 other states went to 0,
+  and the repaired LS220's went from 17 and 44 to 1 and 21.
+- With the 5% margins of the test sampling, cold failures went from 4 to 6 on
+  LS220, from 1 to 0 on the repaired LS220, and stayed put elsewhere.
+- Invalid states with ρ up to ten times ρ_max (8,192 per EOS, cold): on the
+  ideal gas and the synthetic table, where the old Newton found the root above
+  the box, 2.4 and 4.1 µs went to 18 µs, with every state now unsolved. On the
+  real tables, 164–228 µs went to 18–36 µs, the old search having mostly ended
+  in the fallback anyway. The hybrid went from 10 to 12 µs.
+- Warm and cold solves of states with D ≤ ρ_max, timed alternately against the
+  previous commit, differed by no more than the noise, ±5%.
+
+`study/cold_failures.jl` rerun: cold failures 5, 9, 10 and 7 (LS220, SRO LS220,
+DD2 either version, SFHo); `con2prim_safe` projects 23 of the 31 onto a face
+and returns 8 as `NOT_CONVERGED`. The new LS220 failure is a state the previous
+commit converged to ρ = 3.0·10¹⁶, three times the box's top. The superseded figures from 2026-10-23 were 4, 9, 10
+and 7, with 22 of 30 projected and 8 `NOT_CONVERGED`; before the con2prim fixes
+of that day there had been 41, of which 1.x's diagnosis found 29 outside the
+entropy window and sent 12 to the atmosphere.
+
+`study/cold_resolve.jl` rerun: the states re-flagged cold stayed within 3 of
+their previous counts, and SRO LS220's largest excess fell from 4·10⁻³ to
+4·10⁻⁶. The rows of [CODE.md](CODE.md#the-contract)'s table it superseded:
+
+| table | excess p99 | max | > 4·tol (old slack) | > 10⁻⁷ | re-flagged cold |
+| --- | --- | --- | --- | --- | --- |
+| synthetic | 5·10⁻⁹ | 6·10⁻⁷ | 770 of 4,638 | 1 | 1 |
+| LS220 | 2·10⁻⁹ | 2·10⁻⁵ | 271 of 3,899 | 23 | 140 |
+| SRO LS220 | 3·10⁻⁸ | 4·10⁻³ | 313 of 3,899 | 30 | 148 |
+| DD2 | 4·10⁻³ | 0.8 | 479 of 4,069 | 127 | 134 |
+| DD2 repaired | 4·10⁻³ | 0.8 | 492 of 4,068 | 127 | 135 |
+| SFHo | 4·10⁻⁹ | 0.7 | 402 of 3,998 | 30 | 63 |
+
+Fixed with it: `study/cold_failures.jl`'s bisection wrote
+`cond ? (a, ra = m, r) : (b, rb = m, r)`, which in parentheses builds a
+NamedTuple and assigns nothing. The rescue rejected on 2026-10-23
+([State policy](#state-policy)) had therefore only evaluated the window's
+midpoint. With the bracket updated it still recovers none of the cold failures,
+before this change and after it, so that decision stands.
+
+The C++ brackets [0, w_max] as well, and presumably fails the same states; that
+was not measured.
+
+2026-10-25. Measured the confined search on an H200 (Symmetry, cn113). Old and
+new ran in one job, with `study/device_parity.jl` at Float64 and at Float32 on
+every table, and the full test suite with `ENTROPYEOS_TEST_GPU=cuda` and the real
+tables (34,830 passed). The results are in
+[CODE.md](CODE.md#deliberate-deviations-from-the-c).
+
+- **Cold failures at Float32.** They rose ten times more than at Float64 (0.75%
+  and 0.91% of LS220's and SRO LS220's states, against 0.08% and 0.02%). The
+  reason is that the old search converged far more often at Float32: on LS220,
+  1,037,772 of 2²⁰ states against 1,025,528 at Float64.
+- **What the lost states were.** A host run at 2¹⁸ states classified them by
+  comparing the result with the input, within 1% in ρ and in s. Of 2,114 on
+  LS220, 2,113 had converged on another state, and 2,031 of those had an acausal
+  input. 1,700 of them sat at s < 10⁻³, the foot of the entropy extension, at a
+  median 27% of the input's ρ. On SRO LS220 it was 2,610 of 2,639.
+- **A metric that failed.** An error scaled by the conditioning
+  cosh² w/(1 − cs²·tanh² w) had first passed nearly all of these lost states as
+  correct. It does not hold where the input is acausal, because that
+  denominator turns negative there.
+
+Warm `con2prim` at Float64 got 2–4% slower on the device: the synthetic table
+three times, DD2 twice and a Float32-stored LS220 once, each run alternating old
+and new. The host measurement had not resolved this. The same day's
+investigation is under [Two stages](#two-stages): the `exp10` was not the
+cause, and what could be recovered was recovered in the first stage only.
+
+Superseded by it: the two-kernel gain on the real tables was 1.5–2.7, from
+SFHo's 1.4 → 2.1 to DD2's 1.8 → 4.8 million states per second; it is now
+1.8–2.7.
+
 ## Testing
 
 2026-10-24. Added the C++ cross-check through EntropyEOS_jll. Until then every
@@ -497,3 +689,33 @@ found.
 
 2026-09-24. Products of two conserved quantities overflow Float32;
 `seed_z_solve` did this until the study found it.
+
+2026-10-25. The H200 figures on the "Precision and GPUs" page were remeasured
+after the search was confined to the density box
+([Deliberate deviations from the C++](#deliberate-deviations-from-the-c)). The
+figures they replace:
+
+- LS220 at Float64, host / device: cold converged 1025421 / 1025417; cold round
+  trip ρ 3.37e-9 / 3.39e-9 at p99 and 33.2 / 33.5 at maximum; evaluate `p`
+  maximum 1.56e-12; cold-result agreement 99.85%.
+- Float32 cold ρ p99, host / device: LS220 0.24 / 0.28, SRO LS220 0.16 / 0.24,
+  DD2 0.16 / 0.15, SFHo 0.10 / 0.10.
+- On DD2 at Float32, the device had 6% more cold failures than the host.
+- Throughput, measured 2026-10-23, in million states per second on LS220:
+
+  | | evaluate | cold | warm |
+  | --- | --- | --- | --- |
+  | Float64 | 311 | 1.5 | 315 |
+  | Float64, two kernels | | 4.0 | |
+  | mixed | 357 | 1.2 | 336 |
+  | Float32 | 474 | 5.8 | 859 |
+  | Float32, two kernels | | 13.1 | |
+
+- Synthetic table cold: 67.
+- Two-kernel Float64 cold on the other real tables: 2.1–5.1.
+- Pure Float32 against Float64: up to 3.9 times faster, on cold con2prim.
+
+Several of these had drifted before the change. The previous commit, measured
+in the same job, gave 5.79e-10 for the LS220 cold ρ p99, 99.989% agreement,
+0.54 / 0.52 for LS220's Float32 cold ρ p99, and 10.5% for DD2's Float32
+excess failures.
