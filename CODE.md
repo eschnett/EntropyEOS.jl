@@ -222,6 +222,13 @@ one-sided band: it decides what counts as valid, not where a projection
 lands. The Float64 value is sized for a re-solve without a guess (see
 [The contract](#the-contract)).
 
+`inside_window(eos, ρ, s, yₑ)` is the Yₑ and s part of that test, exported for
+an application that makes states itself, as by reconstruction, and has to
+accept every state `con2prim_safe` returns: tested against the exact window, a
+state within the slack of an s face fails. It does not test ρ, since a
+reconstructed state may lie below ρ_min. `inside_faces` and `project_prim_state`
+share its pieces, so the three cannot disagree.
+
 "Closest" has no metric: D, S and τ have different units, and a priority order
 does not work either (keeping D at the density ceiling would mean raising w,
 creating momentum). Instead each face fixes one primitive and frees one

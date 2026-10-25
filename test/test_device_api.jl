@@ -3,6 +3,7 @@ _dev_eval(v, ρ, s, y, u) = EntropyEOS.evaluate(v, ρ, s, y, u).U
 _dev_c2p(v, cin, opts) = EntropyEOS.con2prim(v, cin, opts).ρ
 _dev_safe(v, cin, opts, proj) = EntropyEOS.con2prim_safe(v, cin, opts, proj).base.ρ
 _dev_policy(v, cin, out, proj, pol) = EntropyEOS.apply_policy(v, cin, out, proj, pol).base.ρ
+_dev_window(v, ρ, s, y) = EntropyEOS.inside_window(v, ρ, s, y)
 # One helper per entry point rather than a varargs `_allocs(f, args...)`: the
 # splat itself allocates on x86-64, and the measurement then reports the
 # harness instead of the kernel.
@@ -21,6 +22,10 @@ end
 function _dev_policy_allocs(v, cin, out, proj, pol)
     _dev_policy(v, cin, out, proj, pol)
     return @allocated _dev_policy(v, cin, out, proj, pol)
+end
+function _dev_window_allocs(v, ρ, s, y)
+    _dev_window(v, ρ, s, y)
+    return @allocated _dev_window(v, ρ, s, y)
 end
 
 @testset "device readiness" begin
@@ -101,6 +106,7 @@ end
         @test_noallocs _dev_eval_allocs(v, ρ, s, yₑ, NaN)
         @test_noallocs _dev_c2p_allocs(v, cin, opts)
         @test_noallocs _dev_safe_allocs(v, cin, opts, proj)
+        @test_noallocs _dev_window_allocs(v, ρ, s, yₑ)
         # The projection's face solves, not only the already-valid exit: too
         # hot, too cold, too dense, below ρ_min, non-finite.
         for bad in (Con2PrimIn(cin.D, 1e6 * cin.τ, cin.D_Y, cin.S_par, cin.S_perp, cin.B²),
@@ -119,6 +125,7 @@ end
         out = @inferred con2prim_safe(v, cin, opts, proj)
         @test out isa Con2PrimSafeOut{Float64}
         @test (@inferred apply_policy(v, cin, out, proj, pol)) isa Con2PrimSafeOut{Float64}
+        @test (@inferred inside_window(v, ρ, s, yₑ)) === true
 
         v32 = E.narrow(v, Float32)
         @test v32 isa EOSTableView{Float32}
@@ -133,6 +140,7 @@ end
         @test isfinite(con2prim(v32, cin32, opts32).ρ)
         proj32 = default_projection(v32, Float32(1e3 * v.κ))
         @test (@inferred con2prim_safe(v32, cin32, opts32, proj32)) isa Con2PrimSafeOut{Float32}
+        @test (@inferred inside_window(v32, Float32(ρ), Float32(s), Float32(yₑ))) === true
     end
 
     @testset "no hidden mutable state" begin

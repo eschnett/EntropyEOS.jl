@@ -249,6 +249,27 @@ solves, the shared diagnosis with `check_con_state`, and dropping the `τ_max`
 test carry over; its flag rules are replaced by the face flags, and its Q4 by
 level 2 keeping level 1's bits.
 
+2026-10-24. Added `inside_window`, decided by Erik after TreeGRRMHD's upgrade to
+2.0. TreeGRRMHD's reconstruction tested each face state against the exact
+window and, where one failed, used the cell's own value. A cell that
+`con2prim_safe` had returned unflagged 5.5·10⁻⁹ of the window below s_min (a
+cold re-solve of a state written onto that face) failed the test, and so did
+its fallback, so the face went to first order. Under ARS(4,4,3), whose fourth
+explicit weight is negative, that injected mass, and 48 of 48 perturbed
+cut-off atmosphere tubes blew up, against none on 1.1.0, which clamped such a
+root onto s_min and flagged it (TreeGRRMHD's measurements). The Yₑ face has the
+same exposure, since Yₑ one ulp out of range is accepted. Considered and
+rejected:
+
+- exporting `face_slack`: it carries two conventions, relative to the window's
+  width for s and one ulp for Yₑ, and would make its value part of the API;
+- clamping an accepted root onto the window, with flags 0 and the input
+  conservatives: the primitives would no longer reproduce the returned
+  conservatives to the tolerance. For an ideal-gas state half a slack above
+  s_max the clamp moves τ by 1.3·10⁻⁶, relative, and fed back with the clamped
+  output as its guess the solve needs a Newton step, where it needs none with
+  the unclamped one.
+
 ## Discipline in `core/`
 
 ### The one stack buffer

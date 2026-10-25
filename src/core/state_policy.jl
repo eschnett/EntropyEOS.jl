@@ -167,6 +167,42 @@ The Yₑ faces. A value within one ulp of the table's range is valid, since
 end
 
 """
+    s_face(sr, s) -> flags
+
+The s face that `s` lies beyond, to the slack, or 0 inside the window `sr`.
+[`inside_window`](@ref) and [`project_prim_state`](@ref) share it, so that what
+counts as valid and what gets projected cannot drift apart.
+"""
+@inline function s_face(sr::SRange{T}, s::T) where {T}
+    slack = face_slack(T) * (sr.s_max - sr.s_min)
+    s < sr.s_min - slack && return FLAG_POL_S_FLOORED
+    s > sr.s_max + slack && return FLAG_POL_S_CEILED
+    return UInt32(0)
+end
+
+"""
+    inside_window(eos, ρ, s, yₑ) -> Bool
+
+Whether `s` and `Yₑ` lie inside their faces of the valid range at density `ρ`,
+to the slack with which [`con2prim_safe`](@ref) tests them: `Yₑ` within one ulp
+of the table's range, and `s` within `srange(eos, ρ, yₑ)` widened on each side
+by `face_slack` of its width (10⁻⁷ at `Float64`). `ρ` is not tested against a
+range. A non-finite argument or `ρ ≤ 0` gives `false`.
+
+This is the validity test for states an application makes itself, for example
+by reconstruction. Every state that `con2prim_safe` or
+[`project_prim_state`](@ref) returns passes it, including one within the slack
+of an s face, which `con2prim_safe` returns unflagged; testing the window
+exactly would reject that state. The EOS can be evaluated throughout the band,
+which lies far inside [`srange_extended`](@ref).
+"""
+@inline function inside_window(eos::AbstractEOS{S}, ρ::T, s::T, yₑ::T) where {S,T}
+    (isfinite(ρ) && ρ > zero(T) && isfinite(s) && isfinite(yₑ)) || return false
+    clamp_yₑ(eos, yₑ)[2] == 0 || return false
+    return s_face(srange(eos, ρ, yₑ), s) == 0
+end
+
+"""
     fixed_state(eos, proj, yₑ = NaN)
 
 What `con2prim_safe` returns where there is nothing to project: at `ρ_min`, at
@@ -239,9 +275,7 @@ end
     δ = face_slack(T)
     (isfinite(ρ) && isfinite(s) && isfinite(w)) || return false
     (ρ >= ρ_min * (one(T) - δ) && ρ <= ρ_max * (one(T) + δ) && w <= w_cap * (one(T) + δ)) || return false
-    sr = srange(eos, ρ, yₑ)
-    slack = δ * (sr.s_max - sr.s_min)
-    return sr.s_min - slack <= s <= sr.s_max + slack
+    return inside_window(eos, ρ, s, yₑ)
 end
 
 @inline con_finite(in::Con2PrimIn) = isfinite(in.D) && isfinite(in.τ) && isfinite(in.D_Y) &&
@@ -257,7 +291,7 @@ end
 The projection on primitives, where every face is a plain clamp: ρ, then Yₑ,
 then s in the window at the clamped `(ρ, Yₑ)`, then w. Each face is tested with
 the same slack as in `con2prim_safe`, so an output of `con2prim_safe` checks
-clean. Idempotent, bit for bit.
+clean; the Yₑ and s faces are [`inside_window`](@ref)'s. Idempotent, bit for bit.
 
 A non-finite state, `ρ ≤ 0` or `w < 0` has no closest valid state, and gives
 `FLAG_POL_NONFINITE` with the fixed state. `w` is a magnitude, so `w ≥ 0` is not
@@ -286,14 +320,13 @@ function project_prim_state(eos::AbstractEOS{S}, ps::PrimState{T}, proj::Project
     flags |= fy
 
     sr = srange(eos, ρ, yₑ)
-    slack = δ * (sr.s_max - sr.s_min)
-    if s < sr.s_min - slack
+    fs = s_face(sr, s)
+    if fs == FLAG_POL_S_FLOORED
         s = sr.s_min
-        flags |= FLAG_POL_S_FLOORED
-    elseif s > sr.s_max + slack
+    elseif fs == FLAG_POL_S_CEILED
         s = sr.s_max
-        flags |= FLAG_POL_S_CEILED
     end
+    flags |= fs
 
     if w > w_cap * (one(T) + δ)
         w = w_cap

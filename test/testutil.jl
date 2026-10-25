@@ -57,6 +57,7 @@ function policy_violations(eos, proj, opts, cin, out)
     all(isfinite, (b.ρ, b.s, b.ye, b.w, c.D, c.τ, c.D_Y, c.S_par, c.S_perp, c.B²)) || push!(bad, "non-finite")
     # The output is valid ...
     check_prim_state(eos, PrimState(b.ρ, b.s, b.ye, b.w), proj) == 0 || push!(bad, "invalid")
+    inside_window(eos, b.ρ, b.s, b.ye) || push!(bad, "outside the window")
     # ... the input itself where nothing was flagged ...
     if f == 0
         (c.D === cin.D && c.τ === cin.τ && c.D_Y === cin.D_Y && c.S_par === cin.S_par &&
