@@ -37,6 +37,14 @@ performed once before a simulation campaign, and the run-time path contains no
 repair logic. Use the C++ `eos_repair` tool for that, and `check_table` here to
 detect a table that has not been repaired.
 
+The C++ tools (`eos_repair`, `eos_test`, `eos_crop`) are not translated
+either; `bin/` runs the builds that EntropyEOS_jll ships. `bin/` is its own
+Julia environment, so the package does not depend on the JLL, nor on the MPI
+build of HDF5 that the JLL pulls in. `bin/run.jl` passes the tool's exit code
+through, because those codes are verdicts (`eos_repair` exits 1 when it
+changed the table). The three shell scripts beside it only spare typing
+`julia --project=bin bin/run.jl TOOL`.
+
 ## Environment
 
 - Julia 1.10 or newer. Developed on 1.13; CI covers 1.10 and 1.11 on Linux,
@@ -83,6 +91,7 @@ src/host/            owns memory, may throw, never needed on a device
   analytic_eos.jl    the analytic EOSs' validating constructors and GPP constants
   io_stellarcollapse.jl   the stellarcollapse HDF5 reader (read side only)
 src/precompile.jl    PrecompileTools workload over the whole public Float64 path
+bin/                 the C++ tools from EntropyEOS_jll, in their own environment
 ```
 
 Include order in `EntropyEOS.jl` is dependency order, and `test/runtests.jl`
@@ -670,10 +679,14 @@ no reference implementation, in this order:
    or on the hybrid's cold end, the entropy is physically ill-determined, and a
    flat 1e-12 bound would be either false or vacuous.
 4. **Statistical agreement on real tables**, gated behind `ENTROPYEOS_TABLE_DIR`.
+5. **The C++ itself**, run through EntropyEOS_jll on synthetic tables
+   ([§ Validation against the C++](#validation-against-the-c)).
 
 Gating is by environment variable so CI needs nothing: `ENTROPYEOS_TABLE_DIR`
 for the five real tables, `ENTROPYEOS_TEST_GPU` for a GPU backend. Both skip
-with an `@info` rather than failing.
+with an `@info` rather than failing. The C++ cross-check needs no gate, since
+EntropyEOS_jll is a test dependency; it skips likewise on a platform the JLL
+has no build for.
 
 Iteration counts and `C2PResult` are never compared across platforms, only
 values: a state near a decision boundary legitimately takes a different path.
@@ -757,6 +770,33 @@ What is easy to get wrong here:
 
 Where the two can be compared, they agree.
 
+- **In the test suite**, `test/test_cpp_crosscheck.jl` runs the C++ `eos_test`
+  from EntropyEOS_jll (1.1.0+1). The C++ writes its three synthetic tables
+  (clean, seeded, dirty), and both implementations then read the same file. On this
+  Mac (aarch64), measured:
+  - the generators agree to 8e-16;
+  - every `check_table` class count matches, and every node's metric agrees to
+    4e-11 (the test allows 1e-9);
+  - κ and `m_B*` agree to 2e-15;
+  - the con2prim audit's quantiles agree to within 15% above rounding level.
+    For that comparison the test ports the audit's per-state generator, so
+    Julia solves exactly the C++'s 20,000 states.
+
+  The one expected difference is `delta_T` at the 330 nodes of the dirty table
+  whose T stencil spans its planted logenergy plateau. There the ε values are
+  equal, so the stencil sum is 0 in exact arithmetic, and what either side
+  computes is a rounding residual that depends on the last bit of each ε. If
+  the residual is exactly 0, δ_T overflows to Inf and the node is skipped as if
+  its input were non-finite; otherwise it is reported as 1e16 to 1e17. Two
+  things move that last bit. The FMA contractions clang makes by default made
+  290 of the 330 nodes differ on this Mac; the JLL is built with
+  `-ffp-contract=off` since 1.1.0+1, which leaves 2. The math library makes the
+  rest: clang turns `pow(10, x)` into macOS's `__exp10`, which is one ulp from
+  Julia's `exp10` at those 2 nodes. On Linux x86-64, where the build never
+  contracted, the C++ skipped some nodes that Julia evaluates, presumably from
+  glibc's rounding. The plateau itself is reported by `logenergy_nonmonotone_T`
+  either way. The test exempts exactly these nodes, in both directions, and
+  requires all others to agree.
 - The fitted B-spline coefficients are **bitwise identical** when the C++ is
   built with `-ffp-contract=off`. At clang's default some differ in the last
   bits, because clang fuses the elimination update into an FMA and Julia does

@@ -1,0 +1,4 @@
+#!/bin/sh
+# The C++ eos_test, from EntropyEOS_jll; see run.jl.
+dir=$(dirname "$0")
+exec julia --startup-file=no --project="$dir" "$dir/run.jl" eos_test "$@"

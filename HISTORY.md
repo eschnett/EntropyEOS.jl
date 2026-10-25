@@ -4,6 +4,7 @@ How the package got where it is. The current design is in [CODE.md](CODE.md);
 the sections here follow its headings. Dates are those of the commits that
 recorded each item in the documentation.
 
+- [Scope](#scope)
 - [Type design](#type-design)
   - [The EOS interface](#the-eos-interface)
 - [State policy](#state-policy)
@@ -14,6 +15,14 @@ recorded each item in the documentation.
 - [Testing](#testing)
   - [Static analysis](#static-analysis)
 - [Precision and devices](#precision-and-devices)
+
+## Scope
+
+2026-10-24. Added `bin/`, which runs the C++ tools that EntropyEOS_jll ships,
+so that repairing a table no longer needs a C++ build. The tools are wrapped,
+not translated; repair stays out of the package. A package extension was the
+alternative, but it would have offered a Julia function around what is a
+command-line step done once per table, and `bin/` needs no API.
 
 ## Type design
 
@@ -467,6 +476,17 @@ The throughput table it superseded, H200, LS220, millions of states per second:
 | Float32 | 411 | 4.0 | 841 |
 
 ## Testing
+
+2026-10-24. Added the C++ cross-check through EntropyEOS_jll. Until then every
+comparison with the C++ had been run by hand against a local build. The
+JLL ships only executables and a static C++ library with no C interface, so
+reports, not function values, are compared. The first run found that the JLL's
+macOS build contracts `fd3`'s stencil into FMAs. That flipped `delta_T` on 290
+of the 330 plateau nodes between "skipped" and ~1e17 (see
+[CODE.md](CODE.md#validation-against-the-c)). EntropyEOS_jll 1.1.0+1 is built
+with `-ffp-contract=off`, which leaves 2 such nodes on macOS; those come from a
+one-ulp difference between macOS's `__exp10` and Julia's `exp10`, so the test
+keeps the exemption.
 
 ### Static analysis
 
