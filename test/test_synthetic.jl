@@ -5,8 +5,9 @@
     # so the tests fail loudly if the preset ever moves: wiggle on "entropy"
     # over iρ[31,36] × kYₑ[7,9] × jT[11,21]; flatten on "logenergy" over
     # iρ[6,16] × kYₑ[3,5] × jT[4,13]; offset on "entropy" over iρ[1,4] ×
-    # kYₑ[1,3] × jT[1,3]; setvalue on "cs2" at (21,16,6) and (22,17,6), and on
-    # "gamma" at (21,16,6).
+    # kYₑ[1,3] × jT[1,3]; a seam (logpress, logenergy, entropy) over iρ[15,40] ×
+    # jT[27,30] at every kYₑ; setvalue on "cs2" at (21,16,6) and (22,17,6), and
+    # on "gamma" at (21,16,6).
 
     @testset "stored fields equal the analytic functions exactly" begin
         # `==`, not `≈`: within one language nothing may intervene between the
@@ -190,7 +191,7 @@
         defaults = E.make_synthetic_table()
         # Every defect list spelled out as empty: the point is to run
         # apply_flatten!/apply_wiggle!/apply_offset!/apply_stiffen!/
-        # apply_seed!/apply_setvalue! on genuinely empty input and confirm
+        # apply_seam!/apply_seed!/apply_setvalue! on genuinely empty input and confirm
         # they change nothing.
         explicit_empty = E.make_synthetic_table(
             E.SyntheticOptions(;
@@ -198,6 +199,7 @@
                 wiggle=E.WiggleDefect[],
                 offset=E.OffsetDefect[],
                 stiffen=E.StiffenDefect[],
+                seam=E.SeamDefect[],
                 seed=E.SeededViolation[],
                 setvalue=E.SetValue[],
             ),
@@ -296,13 +298,13 @@
             ld = field(dirty, "logenergy")
 
             # Away from the other defects (iρ ≥ 21 clears flatten, kYₑ = 1
-            # clears wiggle) the dirty logenergy is exactly the clean one with
+            # clears wiggle, jT ≤ 26 clears the seam) the dirty logenergy is exactly the clean one with
             # the power-law term added to 10^value -- exactly, because the
             # generator performs precisely these operations.
             matches = true
             for iρ in 21:E.nρ(dirty)
                 term = amp * (density(dirty, iρ) / ρ_c)^α
-                for jT in 1:E.nT(dirty)
+                for jT in 1:26
                     matches &= ld[iρ, jT, 1] == log10(exp10(lc[iρ, jT, 1]) + term)
                 end
             end
@@ -320,6 +322,24 @@
                 jT in 21:E.nT(dirty)
             )
             @test ld[1, :, 10] == lc[1, :, 10]
+        end
+
+        @testset "the seam is a Yₑ-independent level step across iρ 14..16 in the top four T rows" begin
+            pc = field(clean, "logpress")
+            pd = field(dirty, "logpress")
+            logT_max = dirty.logT[end]
+            matches = true
+            for kYₑ in 1:E.nYₑ(dirty), jT in 1:E.nT(dirty)
+                lt = dirty.logT[jT]
+                z = lt > 1.35 ? (lt - 1.35) / (logT_max - 1.35) : 0.0
+                step = 0.04 * z * z
+                @test (step > 0) == (jT >= 27)
+                for iρ in 1:E.nρ(dirty)
+                    shift = iρ <= 14 ? 0.0 : (iρ == 15 ? 0.5 * step : step)
+                    matches &= abs(pd[iρ, jT, kYₑ] - pc[iρ, jT, kYₑ] - shift) <= 1e-12
+                end
+            end
+            @test matches
         end
     end
 
@@ -339,6 +359,13 @@
         )
         @test_throws ArgumentError E.make_synthetic_table(
             E.SyntheticOptions(; grid..., stiffen=[E.StiffenDefect("logenergy", 0.0, 2.0, 1.0)]),
+        )
+        # Seam cells that do not fit, or an onset at the grid's top.
+        @test_throws ArgumentError E.make_synthetic_table(
+            E.SyntheticOptions(; grid..., seam=[E.SeamDefect(grid.nρ - 1, 0.0, 0.01)]),
+        )
+        @test_throws ArgumentError E.make_synthetic_table(
+            E.SyntheticOptions(; grid..., seam=[E.SeamDefect(2, log10(E.SyntheticOptions().T_max_MeV), 0.01)]),
         )
         # Naming a field the table does not have.
         @test_throws KeyError E.make_synthetic_table(

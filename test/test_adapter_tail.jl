@@ -218,6 +218,78 @@ end
         @test reversed.f != expected.f
     end
 
+    # The u-high ratio lock on L's secondary track, and its gate.
+    sample(f, fx, fu, fxx, fxu, fuu) = BsplineEval3(f, fx, fu, 0.0, fxx, fxu, fuu)
+    # dL/dx at fixed s, from tail-evolved L and log-σ samples.
+    dLdx_at_s(L, g) = L.fx - (L.fu / g.fu) * g.fx
+
+    @testset "ratio lock: dL/dx at fixed s is depth-independent, C¹ at the seam" begin
+        w = 0.05
+        # A matter-like seam: the slope ratio varies with x (L_xu ≠ r·g_xu), so
+        # the unlocked tail drifts linearly with depth.
+        Lb = sample(20.5, -0.8, 4.2, 0.3, 0.5, 0.4)
+        gb = sample(log(50.0), -2.0, 7.0, 0.1, -0.6, 0.2)
+        α = E.phase2_slope(E.Track1D(gb.f, gb.fu, gb.fuu), 1.0, w)
+        gspec = E.TailSpec(w, 0.0, 0.0)
+        locked = E.TailSpec(w, 0.0, 0.0, α, gb.fxu, gb.fx, gb.fxx, 0.99)
+        unlocked = E.TailSpec(w, 0.0, 0.0)
+
+        # The gate is fully open here (the locked tail's c_inf ≈ 0.47 ≪ 0.99).
+        r = E.phase2_slope(E.Track1D(Lb.f, Lb.fu, Lb.fuu), 1.0, w) / α
+        @test E.lock_weight(Lb.fx + w / 3 * Lb.fxu, gb.fx + w / 3 * gb.fxu, Lb.fxx, gb.fxx, r, 0.99) == 1.0
+
+        lk, ul = Float64[], Float64[]
+        for depth in (1.5, 2.0, 4.0, 8.0, 16.0)
+            d = depth * w
+            g = E.apply_u_tail(gb, d, gspec)
+            push!(lk, dLdx_at_s(E.apply_u_tail(Lb, d, locked), g))
+            push!(ul, dLdx_at_s(E.apply_u_tail(Lb, d, unlocked), g))
+        end
+        @test all(x -> isapprox(x, lk[1]; rtol=1e-12), lk)
+        @test abs(ul[end] - ul[1]) > 0.1        # the drift the lock removes
+
+        # C¹ at the seam: fx and fxu of the locked tail match the spline sample
+        # as d → 0⁺, and its value track is the unlocked one exactly.
+        at0 = E.apply_u_tail(Lb, 1e-12, locked)
+        @test at0.fx ≈ Lb.fx rtol = 1e-10
+        @test at0.fxu ≈ Lb.fxu rtol = 1e-9
+        for depth in (0.5, 3.0)
+            a = E.apply_u_tail(Lb, depth * w, locked)
+            b = E.apply_u_tail(Lb, depth * w, unlocked)
+            @test a.f === b.f && a.fu === b.fu && a.fuu === b.fuu
+        end
+    end
+
+    @testset "lock gate: open below the cap, closed at and above it, smooth between" begin
+        # c_inf = k0 + j0/(ln10 (1 + k0)) with k0 = A - r·B and j0 = C - r·D;
+        # with r = 0 and D = 0, c_inf = A + C/(ln10 (1 + A)).
+        cap = 0.99
+        @test E.lock_weight(0.3, -1.0, 0.0, 0.0, 0.0, cap) == 1.0     # c_inf = 0.3
+        @test E.lock_weight(0.99, -1.0, 0.0, 0.0, 0.0, cap) == 0.0    # at the cap
+        @test E.lock_weight(1.2, -1.0, 0.0, 0.0, 0.0, cap) == 0.0     # a stiff seam
+        @test E.lock_weight(-1.5, -1.0, 0.0, 0.0, 0.0, cap) == 0.0    # 1 + k0 ≤ 0
+        @test E.lock_weight(NaN, -1.0, 0.0, 0.0, 0.0, cap) == 0.0
+        # The stiff x-structure alone can close it: A small, C large.
+        @test E.lock_weight(0.48, -1.26, 2.85, 0.68, 0.0, cap) == 0.0
+        λs = [E.lock_weight(a, -1.0, 0.0, 0.0, 0.0, cap) for a in 0.85:0.01:0.99]
+        @test issorted(λs; rev=true)
+        @test all(λ -> 0 <= λ <= 1, λs)
+        @test E.lock_weight(0.3f0, -1.0f0, 0.0f0, 0.0f0, 0.0f0, 0.99f0) === 1.0f0
+
+        # A closed gate reproduces the unlocked (pre-1.2.0) tail bit for bit.
+        w = 0.05
+        Lb = sample(20.5, 0.9, 1.0, 3.0, 0.5, 0.4)       # stiff: A ≈ 0.9, C = 3
+        gb = sample(log(50.0), -1.2, 3.0, 0.7, -0.6, 0.2)
+        α = E.phase2_slope(E.Track1D(gb.f, gb.fu, gb.fuu), 1.0, w)
+        locked = E.TailSpec(w, 0.0, 0.0, α, gb.fxu, gb.fx, gb.fxx, 0.99)
+        unlocked = E.TailSpec(w, 0.0, 0.0)
+        for depth in (0.5, 2.0, 8.0)
+            a = E.apply_u_tail(Lb, depth * w, locked)
+            b = E.apply_u_tail(Lb, depth * w, unlocked)
+            @test all(getfield(a, f) === getfield(b, f) for f in fieldnames(BsplineEval3))
+        end
+    end
+
     @testset "finite and allocation-free everywhere in the extended box" begin
         for x in (x_ext_lo, x_lo - hx, x_lo, 0.1, x_hi, x_hi + 3hx),
             u in (u_lo - 8hu, u_lo, 0.1, u_hi, u_hi + 8hu),

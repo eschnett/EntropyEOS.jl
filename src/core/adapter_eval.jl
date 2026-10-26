@@ -63,12 +63,26 @@ Blend width and slope guards for one tail.
 
 `m_floor` enforces monotonicity and is applied *first*; `m_cap` is the causal
 cap. When the cap falls below the floor the floor wins, lexicographically.
+
+The `lock_*` fields configure the ratio lock on the secondary track: σ's
+log-tail growth rate α and its log sample's `g_xu`, `g_x`, `g_xx` at the same
+seam, and `cs²_ext_cap`, against which the lock is gated. `lock_α ≤ 0` skips it,
+which is every tail except L's high-temperature one.
 """
 struct TailSpec{T<:Real}
     w::T
     m_floor::T
     m_cap::T
+    lock_α::T
+    lock_gxu::T
+    lock_gx::T
+    lock_gxx::T
+    lock_cap::T
 end
+
+# Without the lock, as every tail but L's high-temperature one is built.
+TailSpec{T}(w, m_floor, m_cap) where {T} = TailSpec{T}(w, m_floor, m_cap, zero(T), zero(T), zero(T), zero(T), zero(T))
+TailSpec(w::T, m_floor::T, m_cap::T) where {T} = TailSpec{T}(w, m_floor, m_cap)
 
 """Everything `extended_sample` needs to know about one field's extensions."""
 struct ExtSpec{T<:Real}
@@ -83,7 +97,23 @@ struct ExtSpec{T<:Real}
     u_high_b_cap::T
     shift_hat::T
     inv_c²::T
+    # The ratio lock's seam data (see `TailSpec`); `u_high_lock_α = 0`
+    # reproduces the pre-1.2.0 high-temperature tail exactly.
+    u_high_lock_α::T
+    u_high_lock_gxu::T
+    u_high_lock_gx::T
+    u_high_lock_gxx::T
+    u_high_lock_cap::T
 end
+
+# Without the lock, as every field but L is built.
+ExtSpec{T}(x_lo, x_hi, u_lo, u_hi, x_ext_lo, u_m_floor, x_low_log, u_high_log, u_high_b_cap, shift_hat,
+           inv_c²) where {T} =
+    ExtSpec{T}(x_lo, x_hi, u_lo, u_hi, x_ext_lo, u_m_floor, x_low_log, u_high_log, u_high_b_cap, shift_hat, inv_c²,
+               zero(T), zero(T), zero(T), zero(T), zero(T))
+ExtSpec(x_lo::T, x_hi::T, u_lo::T, u_hi::T, x_ext_lo::T, u_m_floor::T, x_low_log::Bool, u_high_log::Bool,
+        u_high_b_cap::T, shift_hat::T, inv_c²::T) where {T} =
+    ExtSpec{T}(x_lo, x_hi, u_lo, u_hi, x_ext_lo, u_m_floor, x_low_log, u_high_log, u_high_b_cap, shift_hat, inv_c²)
 
 # ---------------------------------------------------------------------------
 # The view
@@ -239,9 +269,14 @@ causality is never enforced at the price of the monotonicity the T-solve
 depends on.
 """
 @inline function capped_track(t::Track1D{T}, d::T, w::T, m_floor::T, m_cap::T) where {T}
+    return ramp_track(capped_effective(t, w, m_floor, m_cap), d, w)
+end
+
+"""The track `capped_track` ramps: both high-side guards applied, not yet ramped."""
+@inline function capped_effective(t::Track1D{T}, w::T, m_floor::T, m_cap::T) where {T}
     t = floor_slope(t, one(T), w, m_floor)
     hi = (m_floor > zero(T) && m_cap < m_floor) ? m_floor : m_cap
-    return ramp_track(cap_slope(t, w, hi), d, w)
+    return cap_slope(t, w, hi)
 end
 
 """
@@ -309,6 +344,36 @@ which is exactly the intent.
     return (a_gx > a_m ? a_gx : a_m) * depth <= xlow_log_excursion_max(T)
 end
 
+"""
+    lock_weight(A, B, C, D, r, cap)
+
+The ratio lock's weight λ ∈ [0, 1] at one seam.
+
+The lock makes the high-temperature tail simple enough to bound exactly: its
+sound speed approaches `c_inf = k0 + j0/(ln10·(1 + k0))` monotonically, with
+`k0 = A - r·B` and `j0 = C - r·D` the fixed-s slopes of the two secondary tracks.
+So the lock is safe exactly where `c_inf` is causal, and harmful where it is not:
+at a seam whose own stiff density structure (A and C rather than the ratio r)
+makes `c_inf > 1`, no cap on L's slope in u can bring it down. λ is the quintic
+smoothstep of `(cap - c_inf)/lock_gate_width`: full lock where the locked tail
+would be causal with room to spare, none (the pre-1.2.0 tail, which drifts soft
+rather than stiff) where it would not, and smooth in between.
+
+Zero when `1 + k0 ≤ 0`, where h would not stay positive, and for NaN.
+"""
+@inline function lock_weight(A::T, B::T, C::T, D::T, r::T, cap::T) where {T}
+    k0 = A - r * B
+    one(T) + k0 > zero(T) || return zero(T)
+    c_inf = k0 + (C - r * D) / (ln10(T) * (one(T) + k0))
+    z = (cap - c_inf) / lock_gate_width(T)
+    z > zero(T) || return zero(T)        # also NaN
+    z > one(T) && (z = one(T))
+    # The smoothstep is exactly 1 at z = 1, but just below it rounding (and FMA
+    # contraction) can land one ulp above 1.
+    sm = z * z * z * (T(10) - T(15) * z + T(6) * z * z)
+    return sm < one(T) ? sm : one(T)
+end
+
 # The axis a tail runs along is always known at the call site, so it is encoded
 # in the function rather than in a runtime tag. Each of these splits the sample
 # into the tracks the mixed-derivative composition needs, evolves them, and
@@ -337,15 +402,39 @@ Apply the temperature-direction tail. `fxx` and `fy` are frozen.
 The causal cap applies only on the high side and only where a cap was supplied,
 which is L's high-temperature primary track alone; every other track takes the
 uncapped path bit for bit.
+
+The ratio lock applies in the same place. The causal cap's asymptote
+`cs²(tail) = b/α - 1` assumes the ratio of L's and log σ's slopes in u is the
+same at neighbouring densities, as at a radiation seam. Where it is not -- a
+matter-dominated hot seam, or the seam-blend window repair rebuilds at
+ρ ≈ 1.4·10⁷ -- `dL/dx` at fixed s drifts linearly with depth into the tail and
+carries p and cs² through zero a few cells in. The lock ramps the secondary
+track's slope, over the same one-cell blend the primary track uses, from the
+spline's `L_xu` to the drift-free `r·g_xu`, `r = m_L/α`, weighted by
+[`lock_weight`](@ref). The primary track is untouched, so ε, U and the T-solve
+are bit-identical, and only `U_ρ`, `U_ρρ` and `U_ρs` change. At a radiation seam
+`g_xu = L_xu = 0` already and the lock is a round-off no-op.
 """
 @inline function apply_u_tail(b::BsplineEval3{T}, d::T, spec::TailSpec{T}) where {T}
     f_in = Track1D{T}(b.f, b.fu, b.fuu)
-    f_out = if spec.m_cap > zero(T) && d > zero(T)
+    fx_in = Track1D{T}(b.fx, b.fxu, zero(T))
+    f_out = if spec.lock_α > zero(T) && d > zero(T)
+        t_eff = if spec.m_cap > zero(T)
+            capped_effective(f_in, spec.w, spec.m_floor, spec.m_cap)
+        else
+            floor_slope(f_in, one(T), spec.w, spec.m_floor)
+        end
+        r = phase2_slope(t_eff, one(T), spec.w) / spec.lock_α
+        w3 = spec.w / T(3)
+        λ = lock_weight(b.fx + w3 * b.fxu, spec.lock_gx + w3 * spec.lock_gxu, b.fxx, spec.lock_gxx, r, spec.lock_cap)
+        fx_in = Track1D{T}(fx_in.f0, fx_in.f1, T(2) * λ * (r * spec.lock_gxu - fx_in.f1) / spec.w)
+        ramp_track(t_eff, d, spec.w)
+    elseif spec.m_cap > zero(T) && d > zero(T)
         capped_track(f_in, d, spec.w, spec.m_floor, spec.m_cap)
     else
         generic_track(f_in, d, spec.w, spec.m_floor)
     end
-    fx_out = generic_track(Track1D{T}(b.fx, b.fxu, zero(T)), d, spec.w, zero(T))
+    fx_out = generic_track(fx_in, d, spec.w, zero(T))
     return BsplineEval3{T}(f_out.f0, fx_out.f0, f_out.f1, b.fy, b.fxx, fx_out.f1, f_out.f2)
 end
 
@@ -396,7 +485,10 @@ extra rounding there and keeps the two operators independent.
             else
                 zero(T)
             end
-            b = apply_u_tail(b, d, TailSpec{T}(T(fld.hu), T(spec.u_m_floor), m_cap))
+            lock_α = u_above ? T(spec.u_high_lock_α) : zero(T)
+            b = apply_u_tail(b, d,
+                             TailSpec{T}(T(fld.hu), T(spec.u_m_floor), m_cap, lock_α, T(spec.u_high_lock_gxu),
+                                         T(spec.u_high_lock_gx), T(spec.u_high_lock_gxx), T(spec.u_high_lock_cap)))
         end
     end
 
@@ -418,24 +510,38 @@ extra rounding there and keeps the two operators independent.
     return b
 end
 
-"""
-    σ_u_high_alpha(σ, x_seam, u_hi, y, m_floor)
+"""The entropy's log tail at the high-temperature seam, as `σ_u_high` returns it."""
+struct σUHigh{T<:Real}
+    α::T      # zero when the log tail is inactive (σ ≤ 0 at the seam)
+    g_xu::T
+    g_x::T
+    g_xx::T
+end
 
-The entropy tail's asymptotic log growth rate `dln(σ)/du` -- exactly the slope
-the log tail continues with, and the quantity the energy tail's causal clamp is
-measured against, since the tail's sound speed is `b/α - 1`.
-
-Returns zero when the log tail is inactive, which disables the clamp. `x_seam`
-must already be clamped to the physical density box.
 """
-@inline function σ_u_high_alpha(σ::BsplineView3{S}, x_seam::T, u_hi::T, y::T, m_floor::T) where {S,T}
+    σ_u_high(σ, x_seam, u_hi, y, m_floor)
+
+The entropy tail's asymptotic log growth rate `α = dln(σ)/du` -- exactly the
+slope the log tail continues with, and the quantity the energy tail's causal
+clamp is measured against, since the tail's sound speed is `b/α - 1` -- together
+with the log sample's `g_xu`, `g_x` and `g_xx`, which L's ratio lock needs. One
+sample supplies all four.
+
+`α` is zero when the log tail is inactive, which disables the clamp and the
+lock. `x_seam` must already be clamped to the physical density box.
+"""
+@inline function σ_u_high(σ::BsplineView3{S}, x_seam::T, u_hi::T, y::T, m_floor::T) where {S,T}
     b = bspline_eval3(σ, x_seam, u_hi, y)
-    b.f > zero(T) || return zero(T)
+    b.f > zero(T) || return σUHigh{T}(zero(T), zero(T), zero(T), zero(T))
     g = log_sample(b)
     m_floor_g = m_floor > zero(T) ? m_floor / b.f : zero(T)
     t = floor_slope(Track1D{T}(g.f, g.fu, g.fuu), one(T), T(σ.hu), m_floor_g)
-    return phase2_slope(t, one(T), T(σ.hu))
+    return σUHigh{T}(phase2_slope(t, one(T), T(σ.hu)), g.fxu, g.fx, g.fxx)
 end
+
+"""`α` alone; see [`σ_u_high`](@ref)."""
+@inline σ_u_high_alpha(σ::BsplineView3{S}, x_seam::T, u_hi::T, y::T, m_floor::T) where {S,T} =
+    σ_u_high(σ, x_seam, u_hi, y, m_floor).α
 
 # ---------------------------------------------------------------------------
 # Per-field extension parameters
@@ -449,12 +555,18 @@ end
     )
 end
 
-"""Extension parameters for the energy field, given a causal cap on `b`."""
-@inline function L_ext_spec(v::EOSTableView{S}, b_cap::P) where {S,P}
+"""
+Extension parameters for the energy field, given a causal cap on `b` and,
+optionally, the entropy's log tail at the same seam for the ratio lock. Without
+it (or with `α = 0`) the high-temperature tail is the pre-1.2.0 one exactly.
+"""
+@inline function L_ext_spec(v::EOSTableView{S}, b_cap::P,
+                            lock::σUHigh{P}=σUHigh{P}(zero(P), zero(P), zero(P), zero(P))) where {S,P}
     T = promote_type(S, P)
     return ExtSpec{T}(
         T(v.x_lo), T(v.x_hi), T(v.u_lo), T(v.u_hi), T(v.x_ext_lo), T(v.ext_slope_floor_L),
         false, false, T(b_cap), T(v.shift_hat), T(v.inv_c²),
+        T(lock.α), T(lock.g_xu), T(lock.g_x), T(lock.g_xx), lock.α > zero(P) ? T(v.cs²_ext_cap) : zero(T),
     )
 end
 
@@ -752,10 +864,15 @@ theorem, which is what turns the table's `ε(ρ,T,Yₑ)` into a genuine potentia
 function eval_at(v::EOSTableView{S}, x_use::T, u::T, y::T, flags::UInt32, iters::Int32) where {S,T}
     σ = extended_sample(v.σ, x_use, u, y, σ_ext_spec(v))
     # Above the seam L's tail slope is held to the causal bound, measured
-    # against the entropy tail's own growth rate. One extra sample, on this
-    # path only.
-    b_cap = u > v.u_hi ? u_high_b_cap(v, x_use, y) : zero(T)
-    Lv = extended_sample(v.L, x_use, u, y, L_ext_spec(v, b_cap))
+    # against the entropy tail's own growth rate, and the same sample's g_xu
+    # locks L's secondary track to the drift-free ratio. One extra sample, on
+    # this path only.
+    sh = σUHigh{T}(zero(T), zero(T), zero(T), zero(T))
+    if u > v.u_hi
+        sh = σ_u_high(v.σ, clamp(x_use, T(v.x_lo), T(v.x_hi)), T(v.u_hi), y, T(v.ext_slope_floor_σ))
+    end
+    b_cap = sh.α > zero(T) ? (one(T) + T(v.cs²_ext_cap)) * sh.α : zero(T)
+    Lv = extended_sample(v.L, x_use, u, y, L_ext_spec(v, b_cap, sh))
 
     λ = ln10(T)
     ρ_eff = exp10(x_use)
@@ -817,6 +934,9 @@ function eval_at(v::EOSTableView{S}, x_use::T, u::T, y::T, flags::UInt32, iters:
     p = ρ_eff * ρ_eff * U_ρ
     h = one(T) + U + p / ρ_eff
     cs² = (T(2) * ρ_eff * U_ρ + ρ_eff * ρ_eff * U_ρρ) / h
+    # Set from the returned value itself, in the box and in every extension
+    # band alike; cs² stays unclamped (see `signal_cs²`).
+    flags |= cs²_flags(cs²)
 
     return EOSPoint{T}(U, U_ρ, U_s, U_ρρ, U_ρs, U_s, p, h, cs², exp10(u), μ̃, u, iters, flags)
 end

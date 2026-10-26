@@ -53,6 +53,7 @@ Optional test gates ([CODE.md § Testing](CODE.md#testing)):
 ENTROPYEOS_TABLE_DIR=/Users/eschnett/src/EntropyEOS/tables   # the five real tables, +25 s
 ENTROPYEOS_TEST_GPU=metal                                    # or cuda; needs the backend installed
 JULIA_NUM_THREADS=4                                          # exercises the threading determinism test
+ENTROPYEOS_EOS_TEST=/path/to/eos_test                        # cross-check against a C++ build other than the JLL's
 ```
 
 Precision studies are scripts in `study/`

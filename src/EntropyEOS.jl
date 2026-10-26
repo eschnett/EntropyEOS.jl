@@ -71,6 +71,7 @@ export
     FLAG_POL_ATMOSPHERE, FLAG_POL_NONFINITE, FLAG_POL_NOT_CONVERGED,
     FLAG_POL_ρ_FLOORED, FLAG_POL_ρ_CEILED, FLAG_POL_YE_FLOORED, FLAG_POL_YE_CEILED,
     FLAG_POL_S_FLOORED, FLAG_POL_S_CEILED, FLAG_POL_W_CEILED, FLAG_POL_ANY,
+    FLAG_CS2_ACAUSAL, FLAG_CS2_NONPOSITIVE, FLAG_CS2_OUT_OF_RANGE, signal_cs²,
     Status, C2PResult,
     # B-splines
     BsplineView1, BsplineView3, BsplineEval1, BsplineEval3,
@@ -91,14 +92,14 @@ export
     check_prim_state, project_prim_state, check_con_state, inside_window,
     # Tables
     RawTable, validate_axes, add_field!, has_field, field, field_names,
-    add_attribute!, has_attribute, attribute, attribute_names, energy_shift,
+    add_attribute!, has_attribute, attribute, attribute_names, energy_shift, crop_table, T_HI_ROWS_DROPPED_ATTR,
     density, temperature, electron_fraction,
     # Adapter build and checking
     BuildOptions, AdapterAudit, MonotonicityAudit, AuditLoc, EOSTable, build_eos,
     CheckOptions, CheckReport, CheckClassResult, CheckLoc,
     # Synthetic tables
     SyntheticOptions, SeededViolation, FlattenDefect, WiggleDefect, OffsetDefect,
-    StiffenDefect, SetValue,
+    StiffenDefect, SeamDefect, SetValue,
     make_synthetic_table, dirty_synthetic_options,
     synthetic_eps, synthetic_p, synthetic_s, synthetic_cs2,
     # Loading and checking

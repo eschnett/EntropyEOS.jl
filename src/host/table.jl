@@ -166,3 +166,44 @@ attribute_names(t::RawTable) = t.attribute_names
 
 """The `energy_shift` attribute, in erg/g."""
 energy_shift(t::RawTable) = attribute(t, "energy_shift")
+
+"""
+Name of the attribute -- in a file, of the scalar dataset `read_stellarcollapse`
+surfaces as it -- that records how many of the source table's hottest T rows the
+C++ repair has already dropped (`RepairOptions::trim_t_hi_rows`, 1.2.0). A table
+without it has dropped none.
+"""
+const T_HI_ROWS_DROPPED_ATTR = "eeos_t_hi_rows_dropped"
+
+"""
+    crop_table(t, iρ, jT, kYₑ; fields=nothing)
+
+Slice `t` to the index ranges `iρ × jT × kYₑ`: the three axes, every field (or
+only those named in `fields`, kept in `t`'s own field order) copied verbatim, and
+every attribute unchanged. No unit conversion and no reinterpretation, so the
+result is as verbatim as `t` is. The adapter build's T_max trim
+(`BuildOptions.trim_t_hi_rows`) uses it.
+
+Throws `ArgumentError` if a range is empty or reaches past its axis, and
+`KeyError` if `fields` names a field `t` does not have. Enforces no minimum axis
+size; callers that fit the result check that themselves.
+"""
+function crop_table(t::RawTable{T}, iρ::AbstractUnitRange{<:Integer}, jT::AbstractUnitRange{<:Integer},
+                    kYₑ::AbstractUnitRange{<:Integer}; fields=nothing) where {T}
+    if isempty(iρ) || isempty(jT) || isempty(kYₑ) ||
+       !(checkindex(Bool, axes(t.logρ, 1), iρ) && checkindex(Bool, axes(t.logT, 1), jT) &&
+         checkindex(Bool, axes(t.Yₑ, 1), kYₑ))
+        throw(ArgumentError("crop_table: index box $iρ × $jT × $kYₑ does not fit the table's " *
+                            "$(nρ(t))×$(nT(t))×$(nYₑ(t)) grid"))
+    end
+    fields === nothing || foreach(name -> field(t, name), fields)   # KeyError for a name `t` lacks
+
+    out = RawTable{T}(t.logρ[iρ], t.logT[jT], t.Yₑ[kYₑ])
+    for (name, data) in zip(t.field_names, t.field_data)
+        (fields === nothing || name in fields) && add_field!(out, name, data[iρ, jT, kYₑ])
+    end
+    for (name, value) in zip(t.attribute_names, t.attribute_values)
+        add_attribute!(out, name, value)
+    end
+    return out
+end

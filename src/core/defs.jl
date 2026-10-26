@@ -47,6 +47,51 @@ const FLAG_POL_ANY = FLAG_POL_ATMOSPHERE | FLAG_POL_NONFINITE | FLAG_POL_NOT_CON
                      FLAG_POL_ρ_FLOORED | FLAG_POL_ρ_CEILED | FLAG_POL_YE_FLOORED |
                      FLAG_POL_YE_CEILED | FLAG_POL_S_FLOORED | FLAG_POL_S_CEILED | FLAG_POL_W_CEILED
 
+# Bits 18-19: the returned sound speed. Like bits 0-5 they say what the EOS
+# evaluation found, not what anyone did about it: `EOSPoint.cs²` is the fitted
+# potential's own value and is never clamped, because the con2prim Newton
+# consumes it and a clamped value would belong to no single U. They sit above
+# the policy group so that group stays contiguous. `signal_cs²` is the clamped
+# value for characteristic speeds.
+const FLAG_CS2_ACAUSAL     = UInt32(1) << 18   # !(cs² < 1): superluminal sound speed (or NaN)
+const FLAG_CS2_NONPOSITIVE = UInt32(1) << 19   # !(cs² > 0): imaginary sound speed (or NaN)
+
+"""
+Either sound-speed flag: `flags & FLAG_CS2_OUT_OF_RANGE` answers "is the
+returned cs² outside (0, 1)?".
+"""
+const FLAG_CS2_OUT_OF_RANGE = FLAG_CS2_ACAUSAL | FLAG_CS2_NONPOSITIVE
+
+"""
+    cs²_flags(cs²)
+
+The sound-speed flags a returned `cs²` carries. Written as negated comparisons
+so that a NaN sets both.
+"""
+@inline function cs²_flags(cs²::T) where {T<:Real}
+    flags = UInt32(0)
+    cs² < one(T) || (flags |= FLAG_CS2_ACAUSAL)
+    cs² > zero(T) || (flags |= FLAG_CS2_NONPOSITIVE)
+    return flags
+end
+
+"""
+    signal_cs²(cs², cs²_hi = 1)
+
+The sound speed squared to use for characteristic speeds (Riemann-solver
+wave-speed estimates, CFL limits): `cs²` clamped into `[0, cs²_hi]`, with a NaN
+mapped to `cs²_hi`, the conservative, fastest choice. Pass `EOSPoint.cs²`.
+
+For signal speeds only: never feed the result back into con2prim or any
+derivative identity. The Newton consumes the unclamped `cs²` together with
+`U_ρ` and `U_ρρ`, and a clamped value belongs to no single potential U. Points
+where the clamp acts carry `FLAG_CS2_ACAUSAL` or `FLAG_CS2_NONPOSITIVE`.
+"""
+@inline function signal_cs²(cs²::T, cs²_hi::T=one(T)) where {T<:Real}
+    isnan(cs²) && return cs²_hi
+    return cs² < zero(T) ? zero(T) : (cs² > cs²_hi ? cs²_hi : cs²)
+end
+
 # ---------------------------------------------------------------------------
 # Outcome enums
 #
@@ -214,6 +259,12 @@ back to the plain linear tail. Returns `false` for NaN inputs by construction,
 which is intended.
 """
 @inline xlow_log_excursion_max(::Type{T}) where {T<:Real} = T(40)
+
+"""
+Width, in cs², of the band below `cs²_ext_cap` over which the high-temperature
+tail's ratio lock is faded out (`lock_weight` in core/adapter_eval.jl).
+"""
+@inline lock_gate_width(::Type{T}) where {T<:Real} = T(0.1)
 
 """
 Degeneracy guard for the perpendicular direction in `prim2con`.

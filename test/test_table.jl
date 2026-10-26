@@ -69,6 +69,30 @@
         @test_throws KeyError energy_shift(RawTable(logρ, logT, Yₑ))
     end
 
+    @testset "crop_table" begin
+        t = RawTable(logρ, logT, Yₑ)
+        add_field!(t, "probe", reshape(collect(1.0:24.0), 3, 4, 2))
+        add_field!(t, "other", fill(7.5, 3, 4, 2))
+        add_attribute!(t, "energy_shift", 1.5e18)
+
+        c = crop_table(t, 2:3, 2:2, 1:2)
+        @test size(c) == (2, 1, 2)
+        @test c.logρ == [2.0, 3.0] && c.logT == [0.5] && c.Yₑ == Yₑ
+        @test field_names(c) == field_names(t)
+        @test field(c, "probe") == field(t, "probe")[2:3, 2:2, 1:2]
+        @test energy_shift(c) == 1.5e18
+
+        f = crop_table(t, 1:3, 1:2, 1:2; fields=["other"])
+        @test field_names(f) == ["other"]
+        @test !has_field(f, "probe")
+        @test has_attribute(f, "energy_shift")
+
+        @test_throws ArgumentError crop_table(t, 1:4, 1:2, 1:2)    # past the axis
+        @test_throws ArgumentError crop_table(t, 3:2, 1:2, 1:2)    # empty range
+        @test_throws ArgumentError crop_table(t, 0:2, 1:2, 1:2)
+        @test_throws KeyError crop_table(t, 1:3, 1:2, 1:2; fields=["nope"])
+    end
+
     @testset "scalar type" begin
         t = RawTable{Float32}(logρ, logT, Yₑ)
         @test eltype(t) === Float32

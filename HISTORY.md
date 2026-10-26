@@ -5,6 +5,7 @@ the sections here follow its headings. Dates are those of the commits that
 recorded each item in the documentation.
 
 - [Scope](#scope)
+- [Data model and units](#data-model-and-units)
 - [Type design](#type-design)
   - [The EOS interface](#the-eos-interface)
 - [State policy](#state-policy)
@@ -24,6 +25,48 @@ so that repairing a table no longer needs a C++ build. The tools are wrapped,
 not translated; repair stays out of the package. A package extension was the
 alternative, but it would have offered a Julia function around what is a
 command-line step done once per table, and `bin/` needs no API.
+
+## Data model and units
+
+2026-10-26. Ported the C++ 1.2.0 ("M3k", PR eschnett/EntropyEOS#2, not yet
+merged; ported at its head, 1743044): `BuildOptions.trim_t_hi_rows` and
+`crop_table`, the reader keeping the repair's `eeos_t_hi_rows_dropped` record,
+the u-high ratio lock on L's secondary tail track, and the cs² flags with
+`signal_cs²`. The PR first (ad31730) dropped the hottest T row only from the
+fit, with a build default of 1, and its `eos_repair` wrote that row back
+unrepaired, since the causal cap ran only on the rows kept. Fitted whole, as
+this package and 1.1.0 do, such a file was worse than a 1.1.0 one. Measured
+2026-10-25 without the ratio lock, by the census of
+[CODE.md](CODE.md#where-the-answer-is-not-unique) (32,768 states per table,
+cold; failed / converged on another state):
+
+| table | 1.1.0 repair | ad31730, fitted whole | ad31730, top row cropped | top row cropped from the 1.1.0 file |
+| --- | --- | --- | --- | --- |
+| LS220 | 0 / 17 | 4 / 29 | 0 / 2 | 0 / 2 |
+| SRO LS220 | 0 / 13 | 1 / 35 | 1 / 7 | 0 / 8 |
+| DD2 | 7 / 210 | 0 / 26 | 0 / 0 | 3 / 109 |
+| SFHo | 5 / 179 | 0 / 2 | 0 / 1 | 2 / 109 |
+
+So on LS220 and SRO LS220 dropping the row is the whole effect, while DD2 and
+SFHo also need the seam blend. 1743044 moved the drop into the repair and
+changed the build's default to 0, so that every row of a repaired file is a
+repaired row; this port follows it. Tables repaired by 1743044 give exactly the
+cropped ad31730 column, and the ratio lock changes none of those counts. On the
+published and 1.1.0-repaired tables the lock moves DD2's and SFHo's counts by
+at most 2 states (DD2 7 / 210 to 5 / 212).
+
+The cs² flags are bits 18 and 19, one above the C++'s, because bit 17 is
+`FLAG_POL_W_CEILED` here. The same change corrected CODE.md's claim that the
+C++ numbers the policy bits the same way. It has not since this package's 2.0.0
+replaced the policy layer.
+
+2026-10-26, later. PR eschnett/EntropyEOS#2 merged as 94d09ec, tagged v1.2.0,
+with the same tree as 1743044, and EntropyEOS_jll 1.2.0+0 ships it. `bin/` now
+requires the JLL at 1.2. The JLL's `eos_repair` writes tables that differ from
+the local 1743044 build's by at most 4e-14 relative, presumably because the JLL
+is built with `-ffp-contract=off`. Re-measured on the JLL's tables, the census
+changes by one state: SRO LS220 goes from 1 / 7 to 1 / 6 cold, and SFHo from
+0 / 2 to 0 / 1 warm. CODE.md quotes the JLL's numbers.
 
 ## Type design
 
@@ -701,6 +744,20 @@ of the 330 plateau nodes between "skipped" and ~1e17 (see
 with `-ffp-contract=off`, which leaves 2 such nodes on macOS; those come from a
 one-ulp difference between macOS's `__exp10` and Julia's `exp10`, so the test
 keeps the exemption.
+
+2026-10-26. The cross-check reads the C++'s `--version`. From 1.2.0
+`eos_test --level con2prim` repairs in memory and drops the hottest T row, so
+Julia builds with `trim_t_hi_rows = 1` to solve the same states.
+`ENTROPYEOS_EOS_TEST` points the test at another binary. Run against a local
+build of 1743044, everything passed except the dirty table, whose 1.2.0 preset
+adds a `SeamDefect` that the Julia generator does not have. That comparison is
+marked broken.
+
+2026-10-26, later. With EntropyEOS_jll 1.2.0+0 out, ported `SeamDefect` and the
+dirty preset's seam (`SeamDefect(14, 1.35, 0.04)`, 1-based) and removed the
+broken marker. The dirty tables agree to 2e-16. An `eos_test` older than 1.2.0
+is matched by removing the seam from Julia's preset; the cross-check passes
+against the cached 1.1.0 binary too.
 
 ### Static analysis
 

@@ -15,10 +15,38 @@
         @test reduce(|, eval_flags) & FLAG_POL_ANY == 0    # the groups do not overlap
         @test length(unique(eval_flags)) == 6
         # One bit each, in the documented order: level 2, the outcomes that are
-        # not projections, then the faces as ρ, Yₑ, s, w. The C++ shares them.
+        # not projections, then the faces as ρ, Yₑ, s, w.
         @test pol_flags == ntuple(i -> UInt32(1) << (7 + i), 10)
         @test reduce(|, pol_flags) == FLAG_POL_ANY
         @test FLAG_POL_ANY == 0x0003ff00
+        # The sound-speed bits sit above the policy group, outside both groups.
+        @test FLAG_CS2_ACAUSAL == UInt32(1) << 18
+        @test FLAG_CS2_NONPOSITIVE == UInt32(1) << 19
+        @test FLAG_CS2_OUT_OF_RANGE == FLAG_CS2_ACAUSAL | FLAG_CS2_NONPOSITIVE
+        @test FLAG_CS2_OUT_OF_RANGE & FLAG_POL_ANY == 0
+        @test FLAG_CS2_OUT_OF_RANGE & 0xff == 0
+    end
+
+    @testset "sound-speed flags and signal_cs²" begin
+        @test E.cs²_flags(0.3) == 0
+        @test E.cs²_flags(1.0) == FLAG_CS2_ACAUSAL
+        @test E.cs²_flags(4.88) == FLAG_CS2_ACAUSAL
+        @test E.cs²_flags(0.0) == FLAG_CS2_NONPOSITIVE
+        @test E.cs²_flags(-0.3) == FLAG_CS2_NONPOSITIVE
+        @test E.cs²_flags(NaN) == FLAG_CS2_OUT_OF_RANGE
+        @test E.cs²_flags(0.3f0) == 0
+
+        # Clamped into [0, cs²_hi], NaN to cs²_hi, valid values passed through.
+        @test signal_cs²(NaN) == 1.0
+        @test signal_cs²(NaN, 0.99) == 0.99
+        @test signal_cs²(-0.3) == 0.0
+        @test signal_cs²(4.88) == 1.0
+        @test signal_cs²(4.88, 0.99) == 0.99
+        @test signal_cs²(Inf) == 1.0
+        for x in (0.0, 1e-300, 0.3331, 0.999999, 1.0)
+            @test signal_cs²(x) === x
+        end
+        @test signal_cs²(NaN32) === 1.0f0
     end
 
     @testset "outcome enums" begin

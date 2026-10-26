@@ -33,6 +33,14 @@ Base.@kwdef struct BuildOptions
     ext_slope_floor_σ::Float64 = 1.0e-6
     ext_slope_floor_L::Float64 = 1.0e-8
     cs²_ext_cap::Float64 = 0.99
+    # How many of the table's hottest T rows to leave out of the fit (1.2.0).
+    # The default is 0 because the C++ repair already drops the unreliable top
+    # row from the table itself (`RepairOptions::trim_t_hi_rows`, default 1),
+    # so a repaired table is fitted whole. This is for fitting a table that did
+    # not go through that repair: the fitted box's u_hi -- and with it the
+    # high-temperature tail's launch point -- becomes the last row kept, and
+    # states above it are served by that causal tail (`FLAG_EXT_S_HIGH`).
+    trim_t_hi_rows::Int = 0
 end
 
 """A location in the spline's own coordinates, with the value found there."""
@@ -316,12 +324,35 @@ end
 Build the adapter from a raw table: validate, fit both splines, derive the
 baryon-mass rescaling κ, and record a monotonicity audit.
 
-Throws if an axis is non-uniform or shorter than four points, if `entropy` or
+With `opts.trim_t_hi_rows > 0`, everything works on a copy of `table` cropped to
+its first `nT - trim_t_hi_rows` T rows (fields `entropy` and `logenergy` plus the
+attributes, via [`crop_table`](@ref)), and the built box ends at the last row
+kept.
+
+Throws if an axis is non-uniform or shorter than four points (the T axis counted
+after the trim), if `opts.trim_t_hi_rows` is negative, if `entropy` or
 `logenergy` is missing or non-finite, or if the `energy_shift` attribute is
 absent. It does not repair anything -- that is an offline step, and
 [`check_table`](@ref) is what diagnoses a table that still needs it.
 """
 function build_eos(t::RawTable{T}, opts::BuildOptions=BuildOptions()) where {T}
+    trim = opts.trim_t_hi_rows
+    trim >= 0 || throw(ArgumentError("build_eos: trim_t_hi_rows must be >= 0"))
+    trim == 0 && return build_box(t, opts)
+    nT(t) >= trim + 4 ||
+        throw(ArgumentError("build_eos: T axis has fewer than 4 points after trimming $trim row(s)"))
+    # The same messages as the untrimmed path for a missing field or attribute;
+    # `crop_table` itself would report those differently.
+    check_field_present_finite(t, "logenergy")
+    check_field_present_finite(t, "entropy")
+    has_attribute(t, "energy_shift") ||
+        throw(ArgumentError("build_eos: table has no 'energy_shift' attribute"))
+    trimmed = crop_table(t, 1:nρ(t), 1:(nT(t) - trim), 1:nYₑ(t); fields=("entropy", "logenergy"))
+    return build_box(trimmed, opts)
+end
+
+# `build_eos` on the already trimmed table.
+function build_box(t::RawTable{T}, opts::BuildOptions) where {T}
     nρ_, nT_, nYₑ_ = nρ(t), nT(t), nYₑ(t)
     nρ_ >= 4 || throw(ArgumentError("build_eos: ρ axis has fewer than 4 points"))
     nT_ >= 4 || throw(ArgumentError("build_eos: T axis has fewer than 4 points"))

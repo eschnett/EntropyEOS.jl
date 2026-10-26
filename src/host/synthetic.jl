@@ -72,6 +72,28 @@ Base.@kwdef struct StiffenDefect
     amplitude::Float64 = 0.0
 end
 
+"""
+Plant a ρ-column stitching seam, mimicking the Hempel DD2/SFHo seam at ρ ≈
+1.4e7 g/cm³ (C++ 1.2.0).
+
+Above `log10(T/MeV) = logT_onset`, every node at `iρ ≥ iρ_a + 2` is shifted by
+`step(T)` and the node at `iρ_a + 1` by `step(T)/2`, where
+
+    step(T) = amplitude · ((logT - logT_onset) / (logT_max - logT_onset))²
+
+and `logT_max` is the grid's own top: a level step across cells `iρ_a … iρ_a+2`
+that grows smoothly from zero with T and is the same at every Yₑ. It goes in as
+`step` to `"logpress"`, `step/2` to `"logenergy"` and as the factor `10^step`
+to `"entropy"`, so all three carry the matching kink, as on the real tables.
+Because the shift only grows with T, monotonicity in T is untouched; what it
+breaks is smoothness in ρ.
+"""
+Base.@kwdef struct SeamDefect
+    iρ_a::Int = 1
+    logT_onset::Float64 = 0.0
+    amplitude::Float64 = 0.0   # step in log10(p) at the hottest row
+end
+
 """Set one node of one field to an exact value."""
 Base.@kwdef struct SetValue
     field::String = "entropy"
@@ -85,8 +107,8 @@ end
     SyntheticOptions
 
 Grid, gas parameters and the defects to inject. Defects are applied in the
-order the fields are declared below: flatten, wiggle, offset, stiffen, seed,
-setvalue.
+order the fields are declared below: flatten, wiggle, offset, stiffen, seam,
+seed, setvalue.
 """
 Base.@kwdef struct SyntheticOptions
     nρ::Int = 40
@@ -107,6 +129,7 @@ Base.@kwdef struct SyntheticOptions
     wiggle::Vector{WiggleDefect} = WiggleDefect[]
     offset::Vector{OffsetDefect} = OffsetDefect[]
     stiffen::Vector{StiffenDefect} = StiffenDefect[]
+    seam::Vector{SeamDefect} = SeamDefect[]
     seed::Vector{SeededViolation} = SeededViolation[]
     setvalue::Vector{SetValue} = SetValue[]
 end
@@ -289,7 +312,33 @@ function apply_stiffen!(t::RawTable, defects::AbstractVector{StiffenDefect})
     return t
 end
 
-"""Step 5: add `delta` at one node."""
+"""Step 5: the ρ-column stitching seams; see [`SeamDefect`](@ref)."""
+function apply_seam!(t::RawTable, defects::AbstractVector{SeamDefect})
+    logT_max = t.logT[end]
+    for d in defects
+        1 <= d.iρ_a && d.iρ_a + 2 <= nρ(t) ||
+            throw(ArgumentError("SeamDefect: cells iρ_a … iρ_a+2 (iρ_a = $(d.iρ_a)) do not fit nρ = $(nρ(t))"))
+        d.logT_onset < logT_max ||
+            throw(ArgumentError("SeamDefect: logT_onset must lie below the grid's top log10(T), got $(d.logT_onset)"))
+        logpress = field(t, "logpress")
+        logenergy = field(t, "logenergy")
+        entropy = field(t, "entropy")
+        for jT in 1:nT(t)
+            t.logT[jT] > d.logT_onset || continue
+            z = (t.logT[jT] - d.logT_onset) / (logT_max - d.logT_onset)
+            step = d.amplitude * z * z
+            for kYₑ in 1:nYₑ(t), iρ in (d.iρ_a + 1):nρ(t)
+                shift = iρ == d.iρ_a + 1 ? 0.5 * step : step
+                logpress[iρ, jT, kYₑ] += shift
+                logenergy[iρ, jT, kYₑ] += 0.5 * shift
+                entropy[iρ, jT, kYₑ] *= exp10(shift)
+            end
+        end
+    end
+    return t
+end
+
+"""Step 6: add `delta` at one node."""
 function apply_seed!(t::RawTable, defects::AbstractVector{SeededViolation})
     for v in defects
         check_point(t, v.iρ, v.jT, v.kYₑ, "SeededViolation")
@@ -299,7 +348,7 @@ function apply_seed!(t::RawTable, defects::AbstractVector{SeededViolation})
 end
 
 """
-Step 6, last: overwrite one node outright.
+Step 7, last: overwrite one node outright.
 
 Last on purpose -- a planted `Inf`/`NaN` must not be perturbable by anything
 that runs after it.
@@ -337,7 +386,7 @@ Stored fields are `"logenergy" = log10(ε + energy_shift)`, `"entropy" = s` and
 planted in one of them can only ever be reported as non-finite, never as fatal.
 
 Defects are applied to the stored representation, after every field is in
-place, in the fixed order flatten, wiggle, offset, stiffen, seed, setvalue,
+place, in the fixed order flatten, wiggle, offset, stiffen, seam, seed, setvalue,
 each list running to completion before the next begins.
 """
 function make_synthetic_table(opts::SyntheticOptions=SyntheticOptions())
@@ -402,6 +451,7 @@ function make_synthetic_table(opts::SyntheticOptions=SyntheticOptions())
     apply_wiggle!(table, opts.wiggle)
     apply_offset!(table, opts.offset)
     apply_stiffen!(table, opts.stiffen)
+    apply_seam!(table, opts.seam)
     apply_seed!(table, opts.seed)
     apply_setvalue!(table, opts.setvalue)
 
@@ -412,8 +462,8 @@ end
     dirty_synthetic_options() -> SyntheticOptions
 
 The default 40 × 30 × 10 grid with aux fields and a fixed set of defects, each
-chosen to mimic a pathology actually observed in the LS220/SRO stellarcollapse
-tables. Nothing here is random; the resulting table is the same every time.
+chosen to mimic a pathology actually observed in the LS220/SRO/DD2/SFHo
+stellarcollapse tables. Nothing here is random; the resulting table is the same every time.
 """
 function dirty_synthetic_options()
     return SyntheticOptions(;
@@ -442,6 +492,13 @@ function dirty_synthetic_options()
         # depend on -- untouched. At ρ = 1e15 the term is 1.35e17·100² =
         # 1.35e21 erg/g, about 1.5 c², giving cs² up to ~1.63 at the top nodes.
         stiffen=[StiffenDefect("logenergy", 1.0e13, 2.0, 1.35e17)],
+
+        # The Hempel DD2/SFHo ρ-column stitching seam: a level step across
+        # iρ 14..16 (ρ ≈ 2e8..7e8 g/cm³) in the top four T rows (log10 T ≥ 1.35,
+        # jT 27..30, ≈ 24-50 MeV), reaching 0.04 in log10(p) at T_max. It sits
+        # between the flatten block and the stiffened corner, so the C++
+        # repair's seam-blend fit window (iρ 6..24) meets neither.
+        seam=[SeamDefect(14, 1.35, 0.04)],
 
         # LS220's handful of genuinely non-finite cs2/gamma points.
         setvalue=[
