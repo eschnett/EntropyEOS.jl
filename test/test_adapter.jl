@@ -200,6 +200,55 @@ end
         @test evaluate(v, ρ_in, srange(v, ρ_in, yₑ).s_max + 5, yₑ, NaN).flags & FLAG_EXT_S_HIGH != 0
     end
 
+    @testset "cs² flags agree with the returned cs²" begin
+        # Only the dirty preset's superluminal high-ρ corner, built without
+        # repair, so cs² ≥ 1 really occurs in the box. Every sample -- in the
+        # box and in every extension band -- must carry exactly the flags its
+        # own returned cs² implies.
+        stiff = make_synthetic_table(SyntheticOptions(; stiffen=[E.StiffenDefect("logenergy", 1e13, 2.0, 1.35e17)]))
+        vs = EOSTableView(E.build_eos(stiff))
+        rng = StableRNG(20261025)
+        acausal, mismatches = 0, 0
+        for _ in 1:4000
+            ρ = exp10(vs.x_lo - 0.5 + rand(rng) * (vs.x_hi - vs.x_lo + 0.5))
+            yₑ = vs.y_lo + rand(rng) * (vs.y_hi - vs.y_lo)
+            sr = srange(vs, ρ, yₑ)
+            s = sr.s_min + (-0.2 + 1.4rand(rng)) * (sr.s_max - sr.s_min)
+            pt = evaluate(vs, ρ, s, yₑ, NaN)
+            want_acausal, want_nonpositive = !(pt.cs² < 1), !(pt.cs² > 0)
+            mismatches += ((pt.flags & FLAG_CS2_ACAUSAL != 0) != want_acausal) |
+                          ((pt.flags & FLAG_CS2_NONPOSITIVE != 0) != want_nonpositive)
+            acausal += want_acausal
+        end
+        @test mismatches == 0
+        @test acausal > 0        # the stiffened corner is sampled
+    end
+
+    @testset "trim_t_hi_rows leaves the hottest rows out of the fit" begin
+        # The C++ repair drops the hottest row from the table by default; the
+        # build fits whatever it is given, so its own trim is off.
+        @test BuildOptions().trim_t_hi_rows == 0
+        for trim in (0, 1, 3)
+            et = E.build_eos(tbl, BuildOptions(; trim_t_hi_rows=trim))
+            vt = EOSTableView(et)
+            @test vt.u_lo ≈ tbl.logT[1] rtol = 1e-14
+            @test vt.u_hi ≈ tbl.logT[end - trim] rtol = 1e-14
+            # A state at the table's own T_max lies inside the box only without
+            # a trim; with one the high-temperature tail serves it.
+            ρ = sqrt(exp10(vt.x_lo) * exp10(vt.x_hi))
+            yₑ = 0.5 * (vt.y_lo + vt.y_hi)
+            s = synthetic_s(ρ / vt.κ, opts.T_max_MeV, yₑ, opts)
+            pt = evaluate(vt, ρ, s, yₑ, NaN)
+            @test isfinite(pt.U) && isfinite(pt.cs²)
+            @test (pt.flags & FLAG_EXT_S_HIGH != 0) == (trim > 0)
+            @test pt.T_MeV ≈ opts.T_max_MeV rtol = (trim == 0 ? 1e-6 : 0.05)
+        end
+        # Trimming zero rows is the untrimmed build, bit for bit.
+        @test EOSTableView(E.build_eos(tbl, BuildOptions(; trim_t_hi_rows=0))).κ === v.κ
+        @test_throws ArgumentError E.build_eos(tbl, BuildOptions(; trim_t_hi_rows=E.nT(tbl) - 3))
+        @test_throws ArgumentError E.build_eos(tbl, BuildOptions(; trim_t_hi_rows=-1))
+    end
+
     @testset "finite and physical over the whole extended box" begin
         # Whatever the solver asks for, the answer must be finite and usable --
         # that is the property the whole extension design exists to provide.

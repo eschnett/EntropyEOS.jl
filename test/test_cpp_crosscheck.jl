@@ -11,13 +11,26 @@
 # reported as 1e16 to 1e17. Either side may skip such a node, depending on the
 # platform, so they are excluded below, and every other node must agree.
 
-const CPP_AVAILABLE = EntropyEOS_jll.is_available()
+# `ENTROPYEOS_EOS_TEST` names an `eos_test` binary to use instead of the JLL's,
+# to check against a C++ release the JLL does not ship yet.
+const CPP_EOS_TEST = get(ENV, "ENTROPYEOS_EOS_TEST", "")
+const CPP_AVAILABLE = !isempty(CPP_EOS_TEST) || EntropyEOS_jll.is_available()
 
 """
 Run `eos_test` with `args`, returning its stdout with Unix line endings (the
 Windows build writes CRLF). The exit code is a verdict, not an error.
 """
-_eos_test(args) = replace(read(ignorestatus(`$(EntropyEOS_jll.eos_test()) $args`), String), "\r\n" => "\n")
+function _eos_test(args)
+    exe = isempty(CPP_EOS_TEST) ? EntropyEOS_jll.eos_test() : CPP_EOS_TEST
+    return replace(read(ignorestatus(`$exe $args`), String), "\r\n" => "\n")
+end
+
+const CPP_VERSION = CPP_AVAILABLE ? VersionNumber(match(r"(\d+\.\d+\.\d+)", _eos_test(["--version"]))[1]) : v"0"
+
+# From 1.2.0 the C++ repair drops the table's hottest T row
+# (`RepairOptions::trim_t_hi_rows`), and `eos_test --level con2prim` repairs in
+# memory before it samples. Julia builds with the same trim to see that table.
+const CPP_TRIM = CPP_VERSION >= v"1.2.0" ? 1 : 0
 
 """The `name: count=… max=… rms=…` summary lines of a C++ report, in order."""
 function _cpp_summary(out)
@@ -114,6 +127,12 @@ else
             h5 = joinpath(dir, "$variant.h5")
             gen = _eos_test(["--$variant", "--write-synthetic", h5])
             t = read_stellarcollapse(h5)
+            if variant == "synthetic-dirty" && CPP_VERSION >= v"1.2.0"
+                # 1.2.0's dirty preset adds a SeamDefect, which the Julia
+                # generator does not have yet.
+                @test_broken false
+                continue
+            end
 
             # Julia's generator makes the same table, to libm rounding.
             seeds = [E.SeededViolation(m[1], parse(Int, m[2]) + 1, parse(Int, m[3]) + 1, parse(Int, m[4]) + 1,
@@ -185,11 +204,17 @@ else
         @testset "con2prim" begin
             h5 = joinpath(dir, "synthetic.h5")
             out = _eos_test(["--level", "con2prim", h5, "--worst", "0"])
-            @test occursin("repair (in-memory): status=ok entries=0", out)   # both see the same table
+            # Both see the same table: the repair changes no value, and drops
+            # the rows Julia's build trims.
+            if CPP_TRIM == 0
+                @test occursin("repair (in-memory): status=ok entries=0", out)
+            else
+                @test occursin(r"^repair \(in-memory\): status=repaired entries=0 seams=0 t_rows_dropped=1 "m, out)
+            end
             @test occursin(r"^warm: .* n_failed_total=0$"m, out)
             @test occursin(r"^cold: .* n_failed_total=0$"m, out)
 
-            v = EOSTableView(build_eos(read_stellarcollapse(h5)))
+            v = EOSTableView(build_eos(read_stellarcollapse(h5), BuildOptions(; trim_t_hi_rows=CPP_TRIM)))
             opts = Con2PrimOptions()
             converged(o) = o.result === E.C2PResult.converged_newton || o.result === E.C2PResult.converged_fallback
             rel(a, b) = abs(a - b) / max(abs(b), 1e-30)

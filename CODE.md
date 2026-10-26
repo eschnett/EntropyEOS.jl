@@ -122,6 +122,16 @@ of the conversion done when the adapter is built.
 without cancellation — and the rescaling is exact rather than approximate:
 `ρ*(1+U) = ρ(1+ε)` holds bitwise, and is asserted.
 
+The fitted box ends at the table's hottest T row, and the designed tail serves
+states above it. The C++ 1.2.0 repair drops that row from the table, because the
+published tables' top row is the one it cannot make causal, and records how many
+rows it dropped in `eeos_t_hi_rows_dropped` (`T_HI_ROWS_DROPPED_ATTR`), which
+the reader keeps as an attribute. `BuildOptions.trim_t_hi_rows` drops rows at
+build time instead, for a table that has not been through that repair; it
+defaults to 0, as in the C++, so that a repaired table is fitted whole. A top
+row left in place unrepaired spoils the fit below it
+([HISTORY](HISTORY.md#data-model-and-units)).
+
 ## Type design
 
 **Storage type versus working type.** A view is parameterized on the type of
@@ -398,7 +408,7 @@ faces.
   negative; (c) DD2's and SFHo's cold edge at ρ ≈ 10⁹–10¹¹ and Yₑ ≈ 0.27–0.33,
   where s_min(ρ) dips below zero and h along the edge is not monotone.
 
-(a) and (b) are table defects. At a root of φ, `residuals`' z_w =
+(a) and (b) are table defects, which the C++ 1.2.0 repair removes (below). At a root of φ, `residuals`' z_w =
 z·(1 − cs²)·tanh w gives dφ/dw·cosh² w ≥ 1 − cs²·tanh² w for any B², so at
 fixed s every crossing rises, and the root is unique, wherever cs²·v² < 1. The
 solve at fixed s has the same multiple roots there (see [Open items](#open-items)),
@@ -428,14 +438,29 @@ That sampling keeps 5% inside each end of the density range, so it leaves out
 most of region (a). Over the whole box, cold solves fail on 2.1% of LS220's
 and 2.2% of SRO LS220's valid states and on 0.3% of SFHo's, and on every real
 table a further 0.6–0.8% converge on another exact solution than the one that
-went in, which no flag reports ([Deliberate deviations](#deliberate-deviations-from-the-c)
-has the counts). Regions (a) and (b) are wrong physics, to be fixed by
-repairing the tables, so this is accepted as a limitation
-([Open items](#open-items)). `eos_repair`'s causal cap does fix (a): on LS220
-repaired with it, no cold failure is left over the whole box, and 17 states
-converge on another solution. It does not reach (b), whose violations are not
-anchored at ρ_max: the "DD2 repaired" table measured here had its causal-cap
-stage cap no node.
+went in, which no flag reports. Regions (a) and (b) are wrong physics, and
+repairing the tables removes them. Measured on 2026-10-26: 32,768 valid states
+per table over the whole box (s uniform in the inner 96% of the window, w
+uniform in [0, 6], half with B² = 10⁻³–10 p), solved cold; failed / converged
+on another state:
+
+| table | as published | repaired by 1.1.0 | repaired by 1.2.0 |
+| --- | --- | --- | --- |
+| LS220 | 679 / 202 | 0 / 17 | 0 / 2 |
+| SRO LS220 | 723 / 194 | 0 / 13 | 1 / 7 |
+| DD2 | 5 / 212 | 5 / 212 | 0 / 0 |
+| SFHo | 85 / 276 | 6 / 179 | 0 / 1 |
+
+The 1.1.0 repair's causal cap fixes (a) on LS220 and SRO LS220 but does not
+reach (b), whose violations are not anchored at ρ_max: on DD2 it caps no node.
+The 1.2.0 repair adds a seam blend for (b), drops each table's hottest T row,
+which it cannot repair, and runs the causal cap on what is left. All 11 states
+it leaves are at ρ ≥ 10^15.5, at the top of the box. Warm-started 10⁻³ off, the
+1.2.0 tables leave 1 failure (SRO LS220) and 2 other solutions (SFHo). On a
+1.2.0 table the u-high ratio lock changes none of these counts; on the others it
+moves DD2's and SFHo's by at most 2 states. So a table should be repaired by
+1.2.0 before a run; on a table that is not, this remains a limitation
+([Open items](#open-items)).
 
 #### The contract
 
@@ -527,7 +552,16 @@ The policy bits are 8–17, contiguous, and `FLAG_POL_ANY` masks them; bits 6–
 stay reserved for solver flags. Level 2's bit comes first, then the outcomes
 that are not projections, then the faces in the order ρ, Yₑ, s, w. Every face
 flag names the bound it hit, FLOORED for a lower and CEILED for an upper one.
-The C++ uses the same numbering.
+The C++'s policy layer is a different design, and its bits from 8 up mean other
+things.
+
+Bits 18 and 19, `FLAG_CS2_ACAUSAL` (cs² ≥ 1) and `FLAG_CS2_NONPOSITIVE`
+(cs² ≤ 0), say what the evaluation returned, like bits 0–5; a NaN sets both, and
+`FLAG_CS2_OUT_OF_RANGE` masks them. `EOSPoint.cs²` itself is never clamped:
+con2prim's Newton uses it with `U_ρ` and `U_ρρ`, and a clamped value belongs to
+no potential. `signal_cs²` is the clamped value for wave speeds and CFL limits.
+The table sets them in the box and in every extension band, and the analytic
+EOSs set them too. The C++ has them at bits 17 and 18, above its policy group.
 
 ## Discipline in `core/`
 
@@ -605,6 +639,9 @@ C++ artifact into Julia for no benefit.
 | `view()` / `view_with()` | `EOSTableView` constructors | avoids shadowing `Base.view` |
 | out-parameters (`int &iters_out`, `real S_out[3]`) | extra tuple return values | tuples of isbits values return in registers |
 | `detail::` namespace and `aeval_`/`c2p_`/`pol_` prefixes | descriptive unexported names | one module namespace, no collisions with Base |
+| `crop_table(in, ia, ib, ja, jb, ka, kb, &fields)` | `crop_table(t, iρ, jT, kYₑ; fields)` with index ranges | the inclusive index pairs are what a range is |
+| `flag_cs2_acausal`, `flag_cs2_nonpositive` at bits 17, 18 | bits 18, 19 | bit 17 is `FLAG_POL_W_CEILED` here ([Flags](#flags)) |
+| cs² flags only from the table's `eval_at` | the analytic EOSs set them too | they have no C++ counterpart, and a flag should mean the same on every EOS |
 
 Three numerical changes fix defects that the C++ shares. Together they made cold
 solves of states on an edge of the entropy window converge, where the C++ fails
@@ -902,6 +939,15 @@ Where the two can be compared, they agree.
     For that comparison the test ports the audit's per-state generator, so
     Julia solves exactly the C++'s 20,000 states.
 
+  `ENTROPYEOS_EOS_TEST` names another `eos_test` binary to check against, such
+  as a release the JLL does not ship yet. The test reads its `--version`. From
+  1.2.0 `--level con2prim` repairs in memory and so drops the hottest T row, and
+  Julia then builds with `trim_t_hi_rows = 1` to solve the same table. Against
+  a local build of the C++ 1.2.0 candidate (PR eschnett/EntropyEOS#2 at
+  1743044) everything passes except the dirty table, which its 1.2.0 preset
+  gives a `SeamDefect` that the Julia generator lacks; that comparison is
+  marked broken.
+
   The one expected difference is `delta_T` at the 330 nodes of the dirty table
   whose T stencil spans its planted logenergy plateau. There the ε values are
   equal, so the stencil sum is 0 in exact arithmetic, and what either side
@@ -983,8 +1029,9 @@ Where the two can be compared, they agree.
   in 0–3.7% of states sampled with w uniform in [0, 4], and returns whichever
   it reaches; for 0.35–1.5% the sampled root is not the lowest (measured by
   `study/projection_faces.jl` and `study/root_certificate.jl`, 2026-10-22,
-  before the search was confined). A causally repaired table would remove
-  this; table repair is out of scope ([Scope](#scope)). On a cold start it
+  before the search was confined). The C++ 1.2.0 repair removes nearly all of
+  it ([Where the answer is not unique](#where-the-answer-is-not-unique)); table
+  repair itself is out of scope ([Scope](#scope)). On a cold start it
   makes the solve fail, or the projection's diagnosis misclassify a valid
   state ([Where the answer is not unique](#where-the-answer-is-not-unique)). A
   possible remedy, not proposed: on the failure path only, follow each root

@@ -107,8 +107,9 @@ end
     read_stellarcollapse(path) -> RawTable{Float64}
 
 Load a stellarcollapse.org-format HDF5 table verbatim: the three axes, every
-conforming 3-D field, and the `energy_shift`/`have_rel_cs2` scalars. Nothing is
-converted or interpreted on the way in.
+conforming 3-D field, and the `energy_shift`/`have_rel_cs2` scalars, plus the
+`eeos_t_hi_rows_dropped` record (`T_HI_ROWS_DROPPED_ATTR`) that a 1.2.0 repair
+writes when it drops T rows. Nothing is converted or interpreted on the way in.
 
 Throws `ErrorException` naming the file (and the dataset, when there is one) if
 the file cannot be opened, an axis is missing or not 1-D, or a `points*`
@@ -144,7 +145,7 @@ function read_stellarcollapse(path::AbstractString)
                 # Not a dataset (e.g. a `/repair` provenance group) -- ignore.
                 obj isa HDF5.Dataset || continue
 
-                if name in ("energy_shift", "have_rel_cs2")
+                if name in ("energy_shift", "have_rel_cs2", T_HI_ROWS_DROPPED_ATTR)
                     is_scalar_dataset(obj) && add_attribute!(t, name, read_scalar_as_float64(obj, path, name))
                     continue
                 end

@@ -105,6 +105,14 @@
         @test attribute_names(t) == ["energy_shift", "have_rel_cs2"]
     end
 
+    @testset "the T-trim record is surfaced" begin
+        # A 1.2.0 repair that drops T rows records how many as a scalar dataset.
+        path = write_table_file("trimmed.h5"; extra! = f -> (f[E.T_HI_ROWS_DROPPED_ATTR] = [1.0]))
+        t = E.read_stellarcollapse(path)
+        @test attribute(t, E.T_HI_ROWS_DROPPED_ATTR) == 1.0
+        @test E.T_HI_ROWS_DROPPED_ATTR == "eeos_t_hi_rows_dropped"
+    end
+
     @testset "missing points datasets are not an error" begin
         path = write_table_file("nopoints.h5"; skip = ["pointsrho", "pointstemp", "pointsye"])
         t = E.read_stellarcollapse(path)

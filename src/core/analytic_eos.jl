@@ -78,6 +78,7 @@ end
     p = ρ * ρ * U_ρ
     h = one(T) + U + p / ρ
     cs² = (T(2) * ρ * U_ρ + ρ * ρ * U_ρρ) / h
+    flags |= cs²_flags(cs²)
     # No table temperature and no inner solve; ∂U/∂Yₑ vanishes identically.
     return EOSPoint{T}(U, U_ρ, U_s, U_ρρ, U_ρs, U_s, p, h, cs², T(NaN), zero(T), T(NaN), Int32(0), flags)
 end
