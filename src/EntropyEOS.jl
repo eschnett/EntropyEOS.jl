@@ -99,7 +99,7 @@ export
     CheckOptions, CheckReport, CheckClassResult, CheckLoc,
     # Synthetic tables
     SyntheticOptions, SeededViolation, FlattenDefect, WiggleDefect, OffsetDefect,
-    StiffenDefect, SetValue,
+    StiffenDefect, SeamDefect, SetValue,
     make_synthetic_table, dirty_synthetic_options,
     synthetic_eps, synthetic_p, synthetic_s, synthetic_cs2,
     # Loading and checking

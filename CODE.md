@@ -442,21 +442,22 @@ went in, which no flag reports. Regions (a) and (b) are wrong physics, and
 repairing the tables removes them. Measured on 2026-10-26: 32,768 valid states
 per table over the whole box (s uniform in the inner 96% of the window, w
 uniform in [0, 6], half with B² = 10⁻³–10 p), solved cold; failed / converged
-on another state:
+on another state, with the tables repaired by the `eos_repair` tools that
+EntropyEOS_jll ships (`bin/`):
 
 | table | as published | repaired by 1.1.0 | repaired by 1.2.0 |
 | --- | --- | --- | --- |
 | LS220 | 679 / 202 | 0 / 17 | 0 / 2 |
-| SRO LS220 | 723 / 194 | 0 / 13 | 1 / 7 |
+| SRO LS220 | 723 / 194 | 0 / 13 | 1 / 6 |
 | DD2 | 5 / 212 | 5 / 212 | 0 / 0 |
 | SFHo | 85 / 276 | 6 / 179 | 0 / 1 |
 
 The 1.1.0 repair's causal cap fixes (a) on LS220 and SRO LS220 but does not
 reach (b), whose violations are not anchored at ρ_max: on DD2 it caps no node.
 The 1.2.0 repair adds a seam blend for (b), drops each table's hottest T row,
-which it cannot repair, and runs the causal cap on what is left. All 11 states
+which it cannot repair, and runs the causal cap on what is left. All 10 states
 it leaves are at ρ ≥ 10^15.5, at the top of the box. Warm-started 10⁻³ off, the
-1.2.0 tables leave 1 failure (SRO LS220) and 2 other solutions (SFHo). On a
+1.2.0 tables leave 1 failure (SRO LS220) and 1 other solution (SFHo). On a
 1.2.0 table the u-high ratio lock changes none of these counts; on the others it
 moves DD2's and SFHo's by at most 2 states. So a table should be repaired by
 1.2.0 before a run; on a table that is not, this remains a limitation
@@ -928,7 +929,7 @@ What is easy to get wrong here:
 Where the two can be compared, they agree.
 
 - **In the test suite**, `test/test_cpp_crosscheck.jl` runs the C++ `eos_test`
-  from EntropyEOS_jll (1.1.0+1). The C++ writes its three synthetic tables
+  from EntropyEOS_jll (1.2.0+0). The C++ writes its three synthetic tables
   (clean, seeded, dirty), and both implementations then read the same file. On this
   Mac (aarch64), measured:
   - the generators agree to 8e-16;
@@ -940,13 +941,12 @@ Where the two can be compared, they agree.
     Julia solves exactly the C++'s 20,000 states.
 
   `ENTROPYEOS_EOS_TEST` names another `eos_test` binary to check against, such
-  as a release the JLL does not ship yet. The test reads its `--version`. From
-  1.2.0 `--level con2prim` repairs in memory and so drops the hottest T row, and
-  Julia then builds with `trim_t_hi_rows = 1` to solve the same table. Against
-  a local build of the C++ 1.2.0 candidate (PR eschnett/EntropyEOS#2 at
-  1743044) everything passes except the dirty table, which its 1.2.0 preset
-  gives a `SeamDefect` that the Julia generator lacks; that comparison is
-  marked broken.
+  as a release the JLL does not ship yet. The test reads its `--version` and
+  matches that release. From 1.2.0 `--level con2prim` repairs in memory and so
+  drops the hottest T row, and Julia then builds with `trim_t_hi_rows = 1` to
+  solve the same table. Before 1.2.0 the dirty preset had no `SeamDefect`, and
+  the test removes it from Julia's preset. Against 1.1.0 and 1.2.0 both, all
+  comparisons pass.
 
   The one expected difference is `delta_T` at the 330 nodes of the dirty table
   whose T stencil spans its planted logenergy plateau. There the ε values are

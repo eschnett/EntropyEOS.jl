@@ -60,6 +60,14 @@ The cs² flags are bits 18 and 19, one above the C++'s, because bit 17 is
 C++ numbers the policy bits the same way. It has not since this package's 2.0.0
 replaced the policy layer.
 
+2026-10-26, later. PR eschnett/EntropyEOS#2 merged as 94d09ec, tagged v1.2.0,
+with the same tree as 1743044, and EntropyEOS_jll 1.2.0+0 ships it. `bin/` now
+requires the JLL at 1.2. The JLL's `eos_repair` writes tables that differ from
+the local 1743044 build's by at most 4e-14 relative, presumably because the JLL
+is built with `-ffp-contract=off`. Re-measured on the JLL's tables, the census
+changes by one state: SRO LS220 goes from 1 / 7 to 1 / 6 cold, and SFHo from
+0 / 2 to 0 / 1 warm. CODE.md quotes the JLL's numbers.
+
 ## Type design
 
 ### The EOS interface
@@ -744,6 +752,12 @@ Julia builds with `trim_t_hi_rows = 1` to solve the same states.
 build of 1743044, everything passed except the dirty table, whose 1.2.0 preset
 adds a `SeamDefect` that the Julia generator does not have. That comparison is
 marked broken.
+
+2026-10-26, later. With EntropyEOS_jll 1.2.0+0 out, ported `SeamDefect` and the
+dirty preset's seam (`SeamDefect(14, 1.35, 0.04)`, 1-based) and removed the
+broken marker. The dirty tables agree to 2e-16. An `eos_test` older than 1.2.0
+is matched by removing the seam from Julia's preset; the cross-check passes
+against the cached 1.1.0 binary too.
 
 ### Static analysis
 

@@ -127,12 +127,6 @@ else
             h5 = joinpath(dir, "$variant.h5")
             gen = _eos_test(["--$variant", "--write-synthetic", h5])
             t = read_stellarcollapse(h5)
-            if variant == "synthetic-dirty" && CPP_VERSION >= v"1.2.0"
-                # 1.2.0's dirty preset adds a SeamDefect, which the Julia
-                # generator does not have yet.
-                @test_broken false
-                continue
-            end
 
             # Julia's generator makes the same table, to libm rounding.
             seeds = [E.SeededViolation(m[1], parse(Int, m[2]) + 1, parse(Int, m[3]) + 1, parse(Int, m[4]) + 1,
@@ -140,6 +134,8 @@ else
                      for m in eachmatch(r"^  (\w+) at \(irho=(\d+), jT=(\d+), kYe=(\d+)\) delta=(\S+)$"m, gen)]
             @test length(seeds) == (variant == "synthetic-seeded" ? 4 : 0)
             opts = variant == "synthetic-dirty" ? dirty_synthetic_options() : SyntheticOptions(; seed=seeds)
+            # The seam joined the dirty preset in 1.2.0.
+            CPP_VERSION < v"1.2.0" && empty!(opts.seam)
             tj = make_synthetic_table(opts)
             @test size(tj) == size(t)
             @test sort(field_names(tj)) == sort(field_names(t))

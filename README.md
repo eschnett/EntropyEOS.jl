@@ -129,9 +129,11 @@ bin/eos_crop LS220.h5 small.h5 --irho 0 59 --jt 0 135 --kye 0 15
 ```
 
 The first call sets up the `bin` environment, which takes a few seconds. Each
-tool's `--help` describes its options. Version 1.2.0 of `eos_repair`, not yet in
-EntropyEOS_jll, also repairs DD2's and SFHo's hot seams and drops each table's
-hottest T row. On tables repaired by it, cold `con2prim` almost never fails
+tool's `--help` describes its options. Since version 1.2.0, `eos_repair` also
+repairs DD2's and SFHo's hot seams and drops each table's hottest T row; a
+checkout set up before then gets it with
+`julia --project=bin -e 'using Pkg; Pkg.update()'`. On tables repaired by it,
+cold `con2prim` almost never fails
 ([CODE.md § Where the answer is not unique](CODE.md#where-the-answer-is-not-unique)). On Windows, call
 `julia --project=bin bin/run.jl eos_repair …` instead.
 
