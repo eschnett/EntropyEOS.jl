@@ -418,6 +418,23 @@ end
             # A Float32 EOS evaluated with Float64 arguments computes in Float64.
             @test evaluate(e32, ρ, 10.0, 0.5, NaN) isa EOSPoint{Float64}
         end
+
+        # A downstream code's state that the projection puts on the ρ_min face:
+        # the Newton and the nested fallback both run, and the scan finds no
+        # bracket. Under `--check-bounds=yes` the scan's scratch was once
+        # heap-allocated here.
+        for T in (Float64, Float32)
+            eos = ideal_gas(2.0, T)
+            opts = Con2PrimOptions{T}()
+            proj = default_projection(eos, T(1e-10))
+            D = T(5e-10)
+            cin = Con2PrimIn(D, T(1e-9 - 5e-13), D / 2, zero(T), T(1e-8), zero(T))
+            @test !is_done(con2prim_safe_start(eos, cin, opts, proj)[2])
+            out = con2prim_safe(eos, cin, opts, proj)
+            @test out.base.result === EntropyEOS.C2PResult.failed_no_bracket
+            @test out.policy_flags == FLAG_POL_ρ_FLOORED | FLAG_POL_S_FLOORED
+            @test_noallocs _an_safe_allocs(eos, cin, opts, proj)
+        end
     end
 
     @testset "constructors validate" begin

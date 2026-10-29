@@ -592,9 +592,12 @@ load-bearing and flows through arithmetic. Six consequences worth naming:
   ([HISTORY](HISTORY.md#state-policy)).
 - **The one stack buffer.** `bracket_scan` needs 33 entries live at once and
   cannot recompute them (each costs an inner solve, and the warm-start chain
-  fixes their order). It uses `MVector{33,T}`, local and non-escaping so it is
-  promoted out of the heap. The cap is a `Val` parameter so a GPU caller can
-  shrink per-thread local memory without touching the algorithm
+  fixes their order). It is an `MVector{33,T}`, local and non-escaping so it is
+  promoted out of the heap. It is wrapped in `ScanScratch`, whose bounds check
+  reports the index against `Base.OneTo(N)`: `MVector`'s own check passes the
+  buffer to `BoundsError`, and under `--check-bounds=yes`, where `@inbounds` is
+  ignored, that alone made it escape. The cap is a `Val` parameter so a GPU
+  caller can shrink per-thread local memory without touching the algorithm
   ([HISTORY](HISTORY.md#the-one-stack-buffer)).
 - **Two stages.** A warp runs as long as its slowest state. On a real table
   about 2% of cold states need `con2prim`'s fallback or fail, at many times a
@@ -869,11 +872,12 @@ measure. Two rules:
 - Measure from a **top-level function taking concrete arguments**. A closure
   defined inside a `@testset`, or a varargs `f(args...)` splat, allocates 16
   bytes of its own on x86-64 and the measurement then reports the harness.
-- They are skipped when `--check-bounds=yes` or coverage is active, because
-  those disable `@inbounds` and block optimization, so the property genuinely
-  cannot hold. `julia-runtest` turns both on by default, so CI carries a
-  separate `allocations` job with them off. Keeping bounds checking on
-  elsewhere is worth more than the gate: it catches real indexing bugs.
+- They are skipped when coverage is active, because it blocks optimization, so
+  the property genuinely cannot hold. `julia-runtest` turns coverage on by
+  default, so CI carries a separate `allocations` job with it off, run with
+  bounds checks off and on. They hold with bounds checks on: a downstream code
+  runs its own suite that way. A buffer's bounds check must then not capture
+  the buffer ("The one stack buffer" in [Discipline in `core/`](#discipline-in-core)).
 
 ## Latency
 
