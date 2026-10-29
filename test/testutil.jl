@@ -3,22 +3,16 @@
 """
 Whether an allocation measurement means anything in this session.
 
-The kernels are allocation-free only as *optimized* code. Two common test
-configurations defeat that, and neither indicates a bug:
+The kernels are allocation-free only as *optimized* code, and
+`--code-coverage` instruments every line and blocks many optimizations. That
+does not indicate a bug. `julia-actions/julia-runtest` turns coverage on by
+default, which is why the CI workflow runs extra jobs with it off — those jobs
+are where these assertions actually execute.
 
-  * `--check-bounds=yes` disables every `@inbounds` in the package, so the
-    bounds checks come back and with them the possibility of a throw. The
-    bracket scan's stack scratch is then heap-allocated (528 bytes for the two
-    33-element buffers) rather than promoted to an `alloca`.
-  * `--code-coverage` instruments every line and blocks many optimizations.
-
-`julia-actions/julia-runtest` turns *both* on by default, which is why the CI
-workflow runs one extra job with them off — that job is where these assertions
-actually execute. Keeping bounds checking on elsewhere is worth more than the
-allocation gate: it catches real indexing bugs.
+`--check-bounds=yes` is not excluded: the kernels stay allocation-free with
+their bounds checks on, and a downstream suite runs that way.
 """
-const ALLOCATION_TESTS_MEANINGFUL =
-    Base.JLOptions().check_bounds != 1 && Base.JLOptions().code_coverage == 0
+const ALLOCATION_TESTS_MEANINGFUL = Base.JLOptions().code_coverage == 0
 
 """
     @test_noallocs expr

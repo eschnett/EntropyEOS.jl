@@ -398,6 +398,33 @@ function inner_solve_w(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_pe
 end
 
 """
+    ScanScratch{N,T}()
+
+The bracket scan's stack scratch: an `MVector{N,T}` whose bounds check does not
+capture the buffer. `MVector`'s own check hands the buffer to `BoundsError`;
+under `--check-bounds=yes`, where `@inbounds` is ignored, that lets it escape
+and puts it on the heap. Checking against `Base.OneTo(N)` instead puts only the
+range in the error. Without bounds checks the two are the same code.
+"""
+struct ScanScratch{N,T}
+    v::MVector{N,T}
+end
+@inline ScanScratch{N,T}() where {N,T} = ScanScratch{N,T}(MVector{N,T}(undef))
+
+Base.@propagate_inbounds function Base.getindex(a::ScanScratch{N,T}, i::Int) where {N,T}
+    @boundscheck checkbounds(Base.OneTo(N), i)
+    v = a.v
+    return GC.@preserve v unsafe_load(Base.unsafe_convert(Ptr{T}, pointer_from_objref(v)), i)
+end
+
+Base.@propagate_inbounds function Base.setindex!(a::ScanScratch{N,T}, x, i::Int) where {N,T}
+    @boundscheck checkbounds(Base.OneTo(N), i)
+    v = a.v
+    GC.@preserve v unsafe_store!(Base.unsafe_convert(Ptr{T}, pointer_from_objref(v)), convert(T, x), i)
+    return a
+end
+
+"""
     sort_scan!(s, g, n)
 
 Insertion sort of the scan's `(s, g)` pairs by `s`. Hand-rolled rather than
@@ -467,8 +494,8 @@ function bracket_scan(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_per
     s_phys_hi = max(phys_a.s_max, phys_b.s_max)
 
     # Stack scratch: local and non-escaping, so it is promoted out of the heap.
-    s_cand = MVector{NMAX,T}(undef)
-    g_cand = MVector{NMAX,T}(undef)
+    s_cand = ScanScratch{NMAX,T}()
+    g_cand = ScanScratch{NMAX,T}()
     nc = 0
     @inbounds begin
         nc += 1

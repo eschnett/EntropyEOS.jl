@@ -321,6 +321,20 @@ rejected:
 2026-09-23. The `MVector{33,T}` buffer in `bracket_scan` was the design's
 biggest open risk; it is resolved by the kernel compiling and running on Metal.
 
+2026-10-29. Under `--check-bounds=yes` the buffer was heap-allocated, 272 B at
+`Float64` and 144 B at `Float32`, on every call that reached the scan. TreeGRRMHD
+runs its suite that way, and a state on the ρ_min face failed its allocation
+gates. `Profile.Allocs` traced it to `s_cand` alone on Julia 1.13; on 1.10 and
+1.11 `g_cand` escapes too (544 B and 288 B). The cause is `MVector`'s bounds
+check, which passes the buffer to `BoundsError`: with `@inbounds` ignored, that
+call lets it escape. Both buffers are now wrapped in `ScanScratch`, whose check
+uses `Base.OneTo(N)`; nothing escapes on 1.10, 1.11 or 1.13.
+The results are bit-identical: 16,000 states, 839 of them through the scan.
+The allocation gates, until then skipped under `--check-bounds=yes`, now run
+there too. A sweep of every kernel entry point under bounds checks found no
+other allocation, before or after: `evaluate`, `prim2con`, the `*_start`
+stages, the policy and the projection were already clean.
+
 ### Two stages
 
 2026-10-23. Split `con2prim` and `con2prim_safe` each into a first and a
