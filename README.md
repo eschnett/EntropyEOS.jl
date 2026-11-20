@@ -115,6 +115,24 @@ Both are `isbits` and go into a GPU kernel as they are. They have κ = 1, so
 covers choosing the entropy window, and gives an SLy example built from the
 paper's fits.
 
+### Cold β-equilibrium
+
+For initial data, `cold_beta_slice` builds the cold, neutrinoless β-equilibrium
+states of a table once, and `beta_equilibrium` looks one up by pressure (what a
+TOV solve wants), by density, or by Gibbs energy. Composition changes are
+density jumps at constant pressure, listed in `slice.jumps`. It reads the
+table's chemical potentials, so it needs the raw table that the EOS was built
+from:
+
+```julia
+slice = cold_beta_slice(table, eos)
+r = beta_equilibrium(slice; p=1e-3)   # p in EOSPoint units
+r.ρ★, r.yₑ, r.s, r.point.h            # FLAG_CLAMP_YE in r.flags if outside the table
+```
+
+"Cold" means the table's lowest temperature. See
+[CODE.md § β-equilibrium](CODE.md#β-equilibrium).
+
 ### Repairing a table
 
 Published tables are often not monotone in T, which the adapter needs.

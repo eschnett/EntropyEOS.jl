@@ -57,6 +57,7 @@ include("host/units.jl")
 include("host/table.jl")
 include("host/bspline_fit.jl")
 include("host/adapter_build.jl")
+include("host/beta_equilibrium.jl")
 include("host/check.jl")
 include("host/synthetic.jl")
 include("host/analytic_eos.jl")
@@ -96,6 +97,8 @@ export
     density, temperature, electron_fraction,
     # Adapter build and checking
     BuildOptions, AdapterAudit, MonotonicityAudit, AuditLoc, EOSTable, build_eos,
+    # Initial data
+    BetaEquilibrium, ColdBetaJump, ColdBetaSlice, cold_beta_slice, beta_equilibrium,
     CheckOptions, CheckReport, CheckClassResult, CheckLoc,
     # Synthetic tables
     SyntheticOptions, SeededViolation, FlattenDefect, WiggleDefect, OffsetDefect,

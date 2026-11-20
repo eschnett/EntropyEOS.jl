@@ -44,6 +44,78 @@ function _sample_real_state(v, rng; w_max_sample=6.0, sigma_max=1e4, margin=0.05
             cos_vB=-1 + 2rand(rng), u=pt.u_solved)
 end
 
+"""μ_ν = mu_e − muhat + c on the coldest row, bilinear in raw `log10 ρ` and `Yₑ`: an independent check of a root."""
+function _munu_cold(t, c, x, y)
+    me, mh = field(t, "mu_e"), field(t, "muhat")
+    μ(i, k) = me[i, 1, k] - mh[i, 1, k] + c
+    i = clamp(searchsortedlast(t.logρ, x), 1, length(t.logρ) - 1)
+    k = clamp(searchsortedlast(t.Yₑ, y), 1, length(t.Yₑ) - 1)
+    a = (x - t.logρ[i]) / (t.logρ[i + 1] - t.logρ[i])
+    b = (y - t.Yₑ[k]) / (t.Yₑ[k + 1] - t.Yₑ[k])
+    return (1 - a) * (1 - b) * μ(i, k) + a * (1 - b) * μ(i + 1, k) + (1 - a) * b * μ(i, k + 1) + a * b * μ(i + 1, k + 1)
+end
+
+# The conventions, clamping and phase transitions were surveyed on these tables
+# before the slice was written (CODE.md, "β-equilibrium"); the expectations
+# below are that survey's.
+function _test_beta_equilibrium(name, t, eos)
+    v = EOSTableView(eos)
+    lκ = log10(v.κ)
+    Q, mₑ = 1.29333, EntropyEOS.M_ELECTRON_MEV
+    oconnor_ott = name == "LS220"
+    if oconnor_ott
+        # Its energy and chemical potentials do not fit one convention at high
+        # density, so the electron-mass check refuses it; given explicitly:
+        @test_throws ArgumentError cold_beta_slice(t, eos)
+        sl = cold_beta_slice(t, eos; energy_offset=-Q + mₑ)
+        @test sl.munu_offset ≈ -Q atol = 1e-4
+        @test 0.3 < sl.munu_mismatch < 0.45    # its munu drops the −Q below ~10⁸ g/cm³
+    else
+        sl = cold_beta_slice(t, eos)
+        @test sl.munu_offset ≈ 0 atol = 1e-6
+        @test sl.munu_mismatch == 0
+        @test sl.energy_offset ≈ mₑ
+    end
+    @test issorted(sl.ρ★) && issorted(sl.p) && issorted(sl.g)
+    # Phase transitions only in SRO LS220, just below nuclear density.
+    if name == "SRO LS220"
+        @test !isempty(sl.jumps)
+        @test all(j -> 13 <= log10(j.ρ★_lo) - lκ && log10(j.ρ★_hi) - lκ <= 14, sl.jumps)
+    else
+        @test isempty(sl.jumps)
+    end
+    @test all(j -> j.ρ★_hi > j.ρ★_lo && abs(j.g_mismatch) < 1e-5, sl.jumps)
+
+    # Lookups by pressure across the whole slice.
+    ps = clamp.(exp.(range(log(sl.p[1]), log(sl.p[end]); length=300)), sl.p[1], sl.p[end])
+    st = [beta_equilibrium(sl; p=q) for q in ps]
+    @test all(k -> isapprox(st[k].point.p, ps[k]; rtol=1e-8), eachindex(ps))
+    @test issorted([r.ρ★ for r in st]) && issorted([r.g for r in st])
+    @test all(r -> r.s == srange(v, r.ρ★, r.yₑ).s_min, st)
+    root_ok = clamp_ok = sane_low = sane_sat = true
+    for r in st
+        x = log10(r.ρ★) - lκ
+        clamped = r.flags & FLAG_CLAMP_YE != 0
+        clamped || abs(_munu_cold(t, sl.munu_offset, x, r.yₑ)) <= 1e-8 || (root_ok = false)
+        # Only O'Connor–Ott and SRO LS220 clamp, and only below nuclear density.
+        clamped && !(12.5 <= x <= 14.5) && (clamp_ok = false)
+        x <= 9 && !(0.4 <= r.yₑ <= 0.51) && (sane_low = false)
+        14.3 <= x <= 14.7 && !(r.yₑ < 0.2) && (sane_sat = false)
+    end
+    @test root_ok
+    @test clamp_ok
+    @test sane_low
+    @test sane_sat
+
+    ys = map((8.0, 10.0, 12.0, 13.0, 14.0, 14.5, 15.0)) do x
+        r★ = exp10(x + lκ)
+        sl.ρ★[1] <= r★ <= sl.ρ★[end] && !any(j -> j.ρ★_lo < r★ < j.ρ★_hi, sl.jumps) ?
+            round(beta_equilibrium(sl; ρ★=r★).yₑ; digits=4) : NaN
+    end
+    @info "$name: $(length(sl.ρ★)) vertices, $(length(sl.jumps)) jumps; Yₑ at log10 ρ = 8, 10, 12, 13, 14, 14.5, 15: $(join(ys, ", "))"
+    return nothing
+end
+
 if isempty(TABLE_DIR) || !isdir(TABLE_DIR)
     @info "real-table tests skipped (set ENTROPYEOS_TABLE_DIR to enable)"
 else
@@ -92,6 +164,12 @@ else
                 @test eos.m_B_star_g ≈ v.κ * tab.m_B
                 @test v.x_lo < v.x_hi && v.u_lo < v.u_hi && v.y_lo < v.y_hi
                 audits[tab.name] = eos.audit.σ_u.violation_count
+
+                if has_field(t, "mu_e") && has_field(t, "muhat")
+                    @testset "β-equilibrium" begin
+                        _test_beta_equilibrium(tab.name, t, eos)
+                    end
+                end
 
                 opts = Con2PrimOptions()
                 rng = StableRNG(987654)

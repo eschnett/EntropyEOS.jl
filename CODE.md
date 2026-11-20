@@ -16,6 +16,7 @@ the method. How the design got here is in [HISTORY.md](HISTORY.md).
   - [Level 1: projection](#level-1-projection)
   - [Level 2: physics](#level-2-physics)
   - [Flags](#flags)
+- [β-equilibrium](#β-equilibrium)
 - [Discipline in `core/`](#discipline-in-core)
 - [Deliberate deviations from the C++](#deliberate-deviations-from-the-c)
 - [Threading](#threading)
@@ -30,7 +31,8 @@ the method. How the design got here is in [HISTORY.md](HISTORY.md).
 ## Scope
 
 Only the run-time path a hydro code calls: load a table, check it, evaluate it,
-and invert it.
+and invert it; plus the one piece of initial data that depends on the EOS alone,
+[cold β-equilibrium](#β-equilibrium).
 
 Table *repair* is deliberately not included — it is an offline activity
 performed once before a simulation campaign, and the run-time path contains no
@@ -86,6 +88,7 @@ src/host/            owns memory, may throw, never needed on a device
   table.jl           RawTable: axes, named 3-D fields, scalar attributes
   bspline_fit.jl     banded LU and the not-a-knot fit
   adapter_build.jl   validate, fit, derive κ, audit monotonicity
+  beta_equilibrium.jl   cold neutrinoless β-equilibrium, for initial data
   check.jl           table diagnostics
   synthetic.jl       an analytic ideal gas, and deliberate defect injectors
   analytic_eos.jl    the analytic EOSs' validating constructors and GPP constants
@@ -564,6 +567,102 @@ no potential. `signal_cs²` is the clamped value for wave speeds and CFL limits.
 The table sets them in the box and in every extension band, and the analytic
 EOSs set them too. The C++ has them at bits 17 and 18, above its policy group.
 
+## β-equilibrium
+
+`cold_beta_slice(table, eos)` builds the cold, neutrinoless β-equilibrium states
+of a tabulated EOS once, as a `ColdBetaSlice`; `beta_equilibrium(slice; p=…)`
+(or `ρ★=…`, `g=…`) returns one state, with the EOS evaluated there. It is for
+initial data (TreeGRRMHD's cold neutron stars), so it is host-side and may
+allocate and throw. It needs the raw table as well as the built EOS, because the
+criterion is read from the table's chemical potentials; a check of the axes
+against the EOS's box rejects a table the EOS was not built from. The C++ has no
+counterpart.
+
+- **Selection: least Gibbs energy at fixed pressure.** In a star gravity stacks
+  phases rather than mixing them, so where the composition changes the density
+  jumps at constant p, and ρ(p) stays single-valued. The least energy at fixed
+  ρ, which the first version used, made p fall with ρ at every switch between
+  `munu` roots (13.6 % on DD2 at log ρ = 8.32, 18 % on SFHo at 9.00; TreeGRRMHD,
+  2026-11-20).
+- **Construction.** At 8 densities per table cell, every upward zero crossing of
+  μ_ν in Yₑ (and a table edge where μ_ν points outward) is placed on the fitted
+  EOS's cold edge, `s = s_min`. Crossings at neighbouring densities that are each
+  other's nearest in Yₑ form branches, cut where p stops rising. At each pressure
+  the branch with the least g is the equilibrium; where that changes, the
+  crossing of the two branches' g is bisected on exact states, so that p and g
+  are equal on both sides of the jump. Below the first pressure of a branch that
+  the table's density box cuts off its g is unknown, so the slice covers only the
+  pressures where every such branch is defined. Building takes ~10 ms, a lookup by
+  p ~30 µs.
+- **In the EOS's own p and g, not a convex hull.** The lower convex hull of the
+  free energy against 1/ρ★ is equivalent in exact thermodynamics, and was tried
+  first. On the real tables it found 2 to 27 jumps each, with hull slopes off from
+  the EOS's pressure at their ends by up to ~10 %: the tables' ε is consistent
+  with their chemical potentials only to a few tenths of an MeV at 10⁸–10¹² g/cm³,
+  and that error times dYₑ/dρ moves a hull's slope. Taking p and g from the
+  fitted EOS makes the slice exactly what a hydro code sees. In those terms DD2,
+  SFHo and LS220 have no phase transition at all: p rises through every
+  composition change on the main branch, and the Yₑ ≈ 0.5 shell branch of the
+  Hempel tables never has the least g. SRO LS220 has four, between log ρ = 13.04
+  and 13.82.
+- **The free energy, not the energy.** g = 1 + U − T̂s + p/ρ★ + c_E·Yₑ. At T_min
+  matter below ~10⁶ g/cm³ is not degenerate, and the energy's slope along an
+  isotherm is not −p; with E in place of F the hull found jumps of negative
+  pressure there, and g fell along the branch.
+- **Criterion.** μ_ν = `mu_e − muhat` + c₀ = 0 on the coldest row, bilinear in
+  log ρ and Yₑ. "Cold" is T_min: 0.01 MeV on the O'Connor–Ott LS220 and the
+  Hempel tables, 0.001 MeV on SRO LS220.
+- **Conventions.** Measured on the coldest row, 2026-11-20; the second column
+  with Richardson-extrapolated difference quotients:
+
+  | table | `munu` − (`mu_e` − `muhat`) | (`mu_e` − `muhat`) − m_B ∂ε/∂Yₑ |
+  | --- | --- | --- |
+  | SRO LS220 | 0 everywhere | 0.510 (IQR 0.507–0.511 above 10¹²) |
+  | DD2, SFHo | 0 everywhere | 0.510 above 10¹⁴; 0.28–0.50 below, IQR up to 0.8 |
+  | LS220 (O'Connor–Ott) | −Q = −1.293 above ~10⁸ g/cm³, 0 below | 0.30–0.38 below 10¹⁴; −0.6, IQR 3, above |
+
+  So the tables' `mu_e` includes the electron's rest mass and their ε does not.
+  The Hempel tables' ε includes the neutron–proton mass difference; O'Connor–Ott
+  LS220's gives every nucleon one mass, and its `munu` subtracts Q, as its
+  documented formula says, but only above ~10⁸ g/cm³ — below, the field is
+  missing the −Q, by the same `mu_e − muhat` relation to ε on both sides. The
+  slice therefore builds μ_ν from `mu_e − muhat` with one constant c₀, the median
+  of `munu − (mu_e − muhat)` (0, or −Q for O'Connor–Ott), reports where `munu`
+  disagrees (`munu_mismatch`, 0.385 on O'Connor–Ott LS220), and corrects the
+  energy by c_E = c₀ + mₑc², so that ∂E/∂Yₑ = μ_ν. The correction moves the
+  relative g of two compositions by c_E·ΔYₑ, 28 keV per baryon between the Hempel
+  tables' 0.506 and 0.451 branches. It is checked: above 10¹³·⁵ g/cm³ the second
+  column must be mₑc² to within 20 keV, which O'Connor–Ott LS220 fails, so that
+  table needs `energy_offset` given explicitly. The test also needs the right
+  baryon mass: the wrong one is off by 0.8 % of μ, ~1 MeV near nuclear density.
+- **Why not `EOSPoint.μ̃`.** μ̃ is (∂U/∂Yₑ)_s, the same combination in principle,
+  but on the cold edge its term ε_T·σ_y/σ_T divides by a small σ_T and magnifies
+  the fit's error. Converted to MeV (`μ̃·κ/conv_t`) and compared with `munu` at
+  every interior node of the T_min row (2026-11-20):
+
+  | table | `munu − μ̃`, 1 % / 50 % / 99 % (MeV) | worst |
+  | --- | --- | --- |
+  | LS220 | −2.9 / −0.9 / 8.6 | ~2400 near log ρ = 14 |
+  | SFHo | −17.6 / 0.3 / 8.8 | 48 near log ρ = 9 |
+  | SRO LS220 | −2.6 / 0.5 / 9.7 | 4.3 near log ρ = 15 |
+
+  Near ρ_sat dμ/dYₑ ≈ 300 MeV, so 3 MeV moves Yₑ by 0.01. U itself, which g
+  uses, interpolates the raw ε through the nodes and has no such error.
+- **Results.** Yₑ at log ρ = 8, 10, 12, 13, 14, 14.5, 15 (raw g/cm³): SFHo 0.453,
+  0.401, 0.167, 0.034, 0.021, 0.055, 0.067; DD2 0.453, 0.401, 0.169, 0.039, 0.028,
+  0.060, 0.094; LS220 0.438, 0.396, 0.211, 0.038, 0.035 (clamped), 0.050, 0.146.
+  O'Connor–Ott LS220 starts at Yₑ = 0.035 and its root lies below that at
+  log ρ ≈ 13.0–14.3; SRO LS220 clamps near log ρ = 13.65; the Hempel tables
+  never. A clamped state sets `FLAG_CLAMP_YE`.
+- **g, not h, for hydrostatics.** Along the slice dg = dp/ρ★, and g is
+  non-decreasing. The EOS's h is not: below ~10⁴ g/cm³ the T·ds term makes it
+  fall, by at most 2·10⁻⁷ (224 edges on DD2 and SFHo). At one SRO jump a branch
+  appears with g already 1.2·10⁻⁷ below the current one; there is no crossing,
+  so the switch is at that branch's first pressure, `g_mismatch` records the
+  drop, and the slice's g is held level.
+- The analytic EOSs have no Yₑ dependence and no chemical potentials, and get no
+  method: the caller chooses Yₑ, and `polytropic_entropy` gives the entropy.
+
 ## Discipline in `core/`
 
 No heap allocation, no `throw`, no `@fastmath`, no closures, no `String`; array
@@ -1012,6 +1111,13 @@ Where the two can be compared, they agree.
   could lift it (untested) **(open)**, at the cost of departing from the C++'s
   representation.
 - `check_table` is serial; see "Threading".
+- **(open)** `EOSPoint.μ̃` on a table's cold edge is off from the table's
+  `munu` by several MeV, and by thousands near log ρ = 14 on LS220
+  ([β-equilibrium](#β-equilibrium)), from the 1/σ_T in its chain rule. Nothing in
+  the package consumes μ̃; a caller using it for weak rates at low temperature
+  should take the table's `munu` instead. Forming it at fixed T, as ε_y − T σ_y in
+  table units, would avoid the division but not the fit's own error in ε_y; how
+  much that helps is unmeasured.
 - **(open)** On CUDA.jl 6.4.2, a kernel that calls `con2prim_safe` and then
   `apply_policy` faults with an illegal address on states pushed off the valid
   range (2²⁰ such states, H200, either precision); on valid states it runs. Each
