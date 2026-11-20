@@ -9,6 +9,7 @@ recorded each item in the documentation.
 - [Type design](#type-design)
   - [The EOS interface](#the-eos-interface)
 - [State policy](#state-policy)
+- [β-equilibrium](#β-equilibrium)
 - [Discipline in `core/`](#discipline-in-core)
   - [The one stack buffer](#the-one-stack-buffer)
   - [Two stages](#two-stages)
@@ -313,6 +314,19 @@ rejected:
   s_max the clamp moves τ by 1.3·10⁻⁶, relative, and fed back with the clamped
   output as its guess the solve needs a Newton step, where it needs none with
   the unclamped one.
+
+## β-equilibrium
+
+2026-11-20. Added `beta_equilibrium`, the cold neutrinoless β-equilibrium
+state for initial data, which TreeGRRMHD needs for cold neutron stars. It lives
+here rather than in the initial-data code because it depends on the EOS alone
+and needs the table's conventions. The first design found the root of the
+fitted potential's μ̃ on the cold edge, which needs no raw table and would run
+in a kernel. It was rejected after measuring μ̃ against the tables' `munu`: off
+by several MeV typically and by up to thousands
+([CODE.md](CODE.md#β-equilibrium) has the numbers). A root of the table's `munu`
+was taken instead, and the same survey found the LS220 clamping and the Hempel
+multiple roots that the function handles.
 
 ## Discipline in `core/`
 

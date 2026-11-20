@@ -44,6 +44,47 @@ function _sample_real_state(v, rng; w_max_sample=6.0, sigma_max=1e4, margin=0.05
             cos_vB=-1 + 2rand(rng), u=pt.u_solved)
 end
 
+"""`munu` on the coldest row, bilinear in raw `log10 ρ` and `Yₑ`: an independent check of the root."""
+function _munu_cold(t, x, y)
+    munu = field(t, "munu")
+    i = clamp(searchsortedlast(t.logρ, x), 1, length(t.logρ) - 1)
+    k = clamp(searchsortedlast(t.Yₑ, y), 1, length(t.Yₑ) - 1)
+    a = (x - t.logρ[i]) / (t.logρ[i + 1] - t.logρ[i])
+    b = (y - t.Yₑ[k]) / (t.Yₑ[k + 1] - t.Yₑ[k])
+    return (1 - a) * (1 - b) * munu[i, 1, k] + a * (1 - b) * munu[i + 1, 1, k] +
+           (1 - a) * b * munu[i, 1, k + 1] + a * b * munu[i + 1, 1, k + 1]
+end
+
+# The roots and their clamping were surveyed on these tables before the
+# function was written (CODE.md, "β-equilibrium"); the bounds below are that
+# survey's, with margin.
+function _test_beta_equilibrium(name, t, eos)
+    v = EOSTableView(eos)
+    lκ = log10(v.κ)
+    nclamped = 0
+    clamp_ok = sane_low = sane_sat = root_ok = true
+    for x★ in range(v.x_lo + 1e-6, v.x_hi - 1e-6; length=400)
+        r = beta_equilibrium(t, eos, exp10(x★))
+        x = x★ - lκ
+        @test v.y_lo <= r.yₑ <= v.y_hi
+        @test r.s == srange(v, exp10(x★), r.yₑ).s_min
+        clamped = r.flags & FLAG_CLAMP_YE != 0
+        nclamped += clamped
+        # Only O'Connor–Ott and SRO LS220 clamp, and only below nuclear density.
+        clamped && !(12.5 <= x <= 14.5) && (clamp_ok = false)
+        clamped || abs(_munu_cold(t, x, r.yₑ)) <= 1e-9 * 100 || (root_ok = false)
+        x <= 9 && !(0.4 <= r.yₑ <= 0.51) && (sane_low = false)
+        14.3 <= x <= 14.7 && !(r.yₑ < 0.2) && (sane_sat = false)
+    end
+    @test clamp_ok
+    @test root_ok
+    @test sane_low
+    @test sane_sat
+    ys = [round(beta_equilibrium(t, eos, exp10(x + lκ)).yₑ; digits=4) for x in (8.0, 10.0, 12.0, 13.0, 14.0, 14.5, 15.0)]
+    @info "$name: cold β-equilibrium Yₑ at log10 ρ = 8, 10, 12, 13, 14, 14.5, 15: $(join(ys, ", ")); $nclamped of 400 clamped"
+    return nothing
+end
+
 if isempty(TABLE_DIR) || !isdir(TABLE_DIR)
     @info "real-table tests skipped (set ENTROPYEOS_TABLE_DIR to enable)"
 else
@@ -92,6 +133,12 @@ else
                 @test eos.m_B_star_g ≈ v.κ * tab.m_B
                 @test v.x_lo < v.x_hi && v.u_lo < v.u_hi && v.y_lo < v.y_hi
                 audits[tab.name] = eos.audit.σ_u.violation_count
+
+                if has_field(t, "munu")
+                    @testset "β-equilibrium" begin
+                        _test_beta_equilibrium(tab.name, t, eos)
+                    end
+                end
 
                 opts = Con2PrimOptions()
                 rng = StableRNG(987654)

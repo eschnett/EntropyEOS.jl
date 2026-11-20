@@ -115,6 +115,20 @@ Both are `isbits` and go into a GPU kernel as they are. They have κ = 1, so
 covers choosing the entropy window, and gives an SLy example built from the
 paper's fits.
 
+### Cold β-equilibrium
+
+For initial data, `beta_equilibrium` gives the `Yₑ` and entropy of a cold star
+in neutrinoless β-equilibrium. It reads the table's own `munu`, so it needs the
+raw table that the EOS was built from:
+
+```julia
+r = beta_equilibrium(table, eos, 1e14 * v.κ)   # ρ★ again, not the raw density
+r.yₑ, r.s, r.point.p                            # FLAG_CLAMP_YE in r.flags if outside the table
+```
+
+"Cold" means the table's lowest temperature. See
+[CODE.md § β-equilibrium](CODE.md#β-equilibrium).
+
 ### Repairing a table
 
 Published tables are often not monotone in T, which the adapter needs.

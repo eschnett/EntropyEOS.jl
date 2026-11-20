@@ -11,3 +11,14 @@ Modules = [EntropyEOS]
 Pages = ["host/table.jl", "host/io_stellarcollapse.jl", "host/check.jl",
          "host/synthetic.jl", "host/units.jl"]
 ```
+
+## Cold β-equilibrium
+
+Initial data for a cold neutron star: the `Yₑ` at which the table's `munu`
+vanishes on its coldest row, and the entropy of the fitted EOS's cold edge
+there.
+
+```@autodocs
+Modules = [EntropyEOS]
+Pages = ["host/beta_equilibrium.jl"]
+```

@@ -16,6 +16,7 @@ the method. How the design got here is in [HISTORY.md](HISTORY.md).
   - [Level 1: projection](#level-1-projection)
   - [Level 2: physics](#level-2-physics)
   - [Flags](#flags)
+- [β-equilibrium](#β-equilibrium)
 - [Discipline in `core/`](#discipline-in-core)
 - [Deliberate deviations from the C++](#deliberate-deviations-from-the-c)
 - [Threading](#threading)
@@ -30,7 +31,8 @@ the method. How the design got here is in [HISTORY.md](HISTORY.md).
 ## Scope
 
 Only the run-time path a hydro code calls: load a table, check it, evaluate it,
-and invert it.
+and invert it; plus the one piece of initial data that depends on the EOS alone,
+[cold β-equilibrium](#β-equilibrium).
 
 Table *repair* is deliberately not included — it is an offline activity
 performed once before a simulation campaign, and the run-time path contains no
@@ -86,6 +88,7 @@ src/host/            owns memory, may throw, never needed on a device
   table.jl           RawTable: axes, named 3-D fields, scalar attributes
   bspline_fit.jl     banded LU and the not-a-knot fit
   adapter_build.jl   validate, fit, derive κ, audit monotonicity
+  beta_equilibrium.jl   cold neutrinoless β-equilibrium, for initial data
   check.jl           table diagnostics
   synthetic.jl       an analytic ideal gas, and deliberate defect injectors
   analytic_eos.jl    the analytic EOSs' validating constructors and GPP constants
@@ -564,6 +567,63 @@ no potential. `signal_cs²` is the clamped value for wave speeds and CFL limits.
 The table sets them in the box and in every extension band, and the analytic
 EOSs set them too. The C++ has them at bits 17 and 18, above its policy group.
 
+## β-equilibrium
+
+`beta_equilibrium(table, eos, ρ★)` returns the `Yₑ` and entropy of a cold star
+in neutrinoless β-equilibrium at one density, and the EOS evaluated there. It is
+for initial data (TreeGRRMHD's cold neutron stars), so it is host-side and may
+allocate and throw. It takes the raw table as well as the built EOS, because the
+criterion is read from the table's `munu` field; a check of the axes against the
+EOS's box rejects a table the EOS was not built from. The C++ has no
+counterpart.
+
+- **Criterion.** `munu = 0` on the table's coldest row, interpolated bilinearly
+  in log ρ and `Yₑ`. "Cold" is T_min: 0.01 MeV on the O'Connor–Ott LS220 and
+  the Hempel tables, 0.001 MeV on SRO LS220. A temperature argument is
+  deliberately absent; hot β-equilibrium with trapped neutrinos is a different
+  condition.
+- **The state is on the fitted EOS.** `s = srange(eos, ρ★, Yₑ).s_min`, and the
+  returned point is `evaluate` there, so the initial data is exactly a state the
+  evolution represents.
+- **Why `munu` and not `EOSPoint.μ̃`.** μ̃ is (∂U/∂Yₑ)_s, the same combination
+  in principle, but on the cold edge its term ε_T·σ_y/σ_T divides by a small
+  σ_T and magnifies the fit's error. Converted to MeV (`μ̃·κ/conv_t`) and compared
+  with `munu` at every interior node of the T_min row (2026-11-20):
+
+  | table | `munu − μ̃`, 1 % / 50 % / 99 % (MeV) | worst |
+  | --- | --- | --- |
+  | LS220 | −2.9 / −0.9 / 8.6 | ~2400 near log ρ = 14 |
+  | SFHo | −17.6 / 0.3 / 8.8 | 48 near log ρ = 9 |
+  | SRO LS220 | −2.6 / 0.5 / 9.7 | 4.3 near log ρ = 15 |
+
+  Near ρ_sat dμ/dYₑ ≈ 300 MeV, so 3 MeV moves `Yₑ` by 0.01; at low density the
+  slope is smaller and the error larger.
+- **`munu`'s convention differs per family; `munu = 0` is right in each.** The
+  raw tables' m_B·(∂ε/∂Yₑ)_T agrees with `mu_e − muhat` in every family
+  (central differences, to ~0.5 MeV). O'Connor–Ott LS220 stores
+  `munu = mu_e − muhat − Q` (Q = m_n − m_p = 1.293 MeV, median offset at T_min),
+  because its `mu_n` and `mu_p` exclude their own rest masses. The Hempel tables
+  and SRO LS220 store `munu = mu_e − muhat`, with Q inside `muhat`. In every
+  case `munu` is the physical μ_ν, which is also what a neutrino scheme reading
+  the same table sees. The tables' ε is not: in LS220 its Yₑ-derivative lacks Q.
+- **Several roots.** On DD2 and SFHo, 14 and 20 rows at log ρ ≈ 7.8–11.7 have
+  three zeros of `munu` in `Yₑ` (shell structure near `Yₑ ≈ 0.5`), and `munu` is
+  not monotone in `Yₑ` on many rows. Every upward crossing, and an endpoint where
+  `munu` points outward, is a local minimum of Φ(Yₑ) = ∫ munu dYₑ, and the
+  global minimum of Φ, integrated exactly over the piecewise-linear `munu`, is
+  returned; `nroots` counts the crossings. Φ, not the tables' free energy, is
+  the potential whose `Yₑ`-derivative is μ_ν in every convention above. At
+  10⁸ g/cm³ this picks `Yₑ` = 0.506 on SFHo and 0.453 on DD2.
+- **Clamping.** O'Connor–Ott LS220 starts at `Yₑ` = 0.035, and its root lies
+  below that at log ρ ≈ 13.0–14.3 (40 of 400 densities sampled across the box);
+  SRO LS220 clamps at 2 of 400, near log ρ = 13.65, and the Hempel tables
+  nowhere. A clamped result sets `FLAG_CLAMP_YE`.
+- Typical values, at log ρ = 8, 10, 12, 13, 14, 14.5, 15 (raw g/cm³):
+  SFHo 0.506, 0.401, 0.167, 0.034, 0.021, 0.055, 0.067; LS220 0.434, 0.396,
+  0.211, 0.038, 0.035 (clamped), 0.050, 0.146. A call costs 1–2 µs.
+- The analytic EOSs have no `Yₑ` dependence and no `munu`, and get no method:
+  the caller chooses `Yₑ`, and `polytropic_entropy` gives the entropy.
+
 ## Discipline in `core/`
 
 No heap allocation, no `throw`, no `@fastmath`, no closures, no `String`; array
@@ -1012,6 +1072,13 @@ Where the two can be compared, they agree.
   could lift it (untested) **(open)**, at the cost of departing from the C++'s
   representation.
 - `check_table` is serial; see "Threading".
+- **(open)** `EOSPoint.μ̃` on a table's cold edge is off from the table's
+  `munu` by several MeV, and by thousands near log ρ = 14 on LS220
+  ([β-equilibrium](#β-equilibrium)), from the 1/σ_T in its chain rule. Nothing in
+  the package consumes μ̃; a caller using it for weak rates at low temperature
+  should take the table's `munu` instead. Forming it at fixed T, as ε_y − T σ_y in
+  table units, would avoid the division but not the fit's own error in ε_y; how
+  much that helps is unmeasured.
 - **(open)** On CUDA.jl 6.4.2, a kernel that calls `con2prim_safe` and then
   `apply_policy` faults with an illegal address on states pushed off the valid
   range (2²⁰ such states, H200, either precision); on valid states it runs. Each
