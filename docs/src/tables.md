@@ -14,9 +14,9 @@ Pages = ["host/table.jl", "host/io_stellarcollapse.jl", "host/check.jl",
 
 ## Cold β-equilibrium
 
-Initial data for a cold neutron star: the `Yₑ` at which the table's `munu`
-vanishes on its coldest row, and the entropy of the fitted EOS's cold edge
-there.
+Initial data for a cold neutron star: the states of least Gibbs energy at each
+pressure among those with `μ_ν = 0` on the table's coldest row, with the phase
+transitions between them explicit.
 
 ```@autodocs
 Modules = [EntropyEOS]

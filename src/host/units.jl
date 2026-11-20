@@ -42,6 +42,14 @@ Empirically this is the baryon-mass convention of the SRO
 const M_NEUTRON_G = 1.67492749804e-24
 
 """
+Electron rest energy in MeV. CODATA 2018.
+
+The tables' `mu_e` includes it and their ε does not, which is what the cold
+β-equilibrium slice's energy correction restores.
+"""
+const M_ELECTRON_MEV = 0.51099895000
+
+"""
 Default baryon mass for converting between per-baryon and per-gram quantities.
 
 The convention is per table family: some formats carry it explicitly, others

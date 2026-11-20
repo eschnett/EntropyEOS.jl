@@ -117,13 +117,17 @@ paper's fits.
 
 ### Cold β-equilibrium
 
-For initial data, `beta_equilibrium` gives the `Yₑ` and entropy of a cold star
-in neutrinoless β-equilibrium. It reads the table's own `munu`, so it needs the
-raw table that the EOS was built from:
+For initial data, `cold_beta_slice` builds the cold, neutrinoless β-equilibrium
+states of a table once, and `beta_equilibrium` looks one up by pressure (what a
+TOV solve wants), by density, or by Gibbs energy. Composition changes are
+density jumps at constant pressure, listed in `slice.jumps`. It reads the
+table's chemical potentials, so it needs the raw table that the EOS was built
+from:
 
 ```julia
-r = beta_equilibrium(table, eos, 1e14 * v.κ)   # ρ★ again, not the raw density
-r.yₑ, r.s, r.point.p                            # FLAG_CLAMP_YE in r.flags if outside the table
+slice = cold_beta_slice(table, eos)
+r = beta_equilibrium(slice; p=1e-3)   # p in EOSPoint units
+r.ρ★, r.yₑ, r.s, r.point.h            # FLAG_CLAMP_YE in r.flags if outside the table
 ```
 
 "Cold" means the table's lowest temperature. See

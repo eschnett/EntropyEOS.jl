@@ -98,7 +98,7 @@ export
     # Adapter build and checking
     BuildOptions, AdapterAudit, MonotonicityAudit, AuditLoc, EOSTable, build_eos,
     # Initial data
-    BetaEquilibrium, beta_equilibrium,
+    BetaEquilibrium, ColdBetaJump, ColdBetaSlice, cold_beta_slice, beta_equilibrium,
     CheckOptions, CheckReport, CheckClassResult, CheckLoc,
     # Synthetic tables
     SyntheticOptions, SeededViolation, FlattenDefect, WiggleDefect, OffsetDefect,

@@ -317,16 +317,32 @@ rejected:
 
 ## β-equilibrium
 
-2026-11-20. Added `beta_equilibrium`, the cold neutrinoless β-equilibrium
-state for initial data, which TreeGRRMHD needs for cold neutron stars. It lives
-here rather than in the initial-data code because it depends on the EOS alone
-and needs the table's conventions. The first design found the root of the
-fitted potential's μ̃ on the cold edge, which needs no raw table and would run
-in a kernel. It was rejected after measuring μ̃ against the tables' `munu`: off
-by several MeV typically and by up to thousands
-([CODE.md](CODE.md#β-equilibrium) has the numbers). A root of the table's `munu`
-was taken instead, and the same survey found the LS220 clamping and the Hempel
-multiple roots that the function handles.
+2026-11-20. Added cold neutrinoless β-equilibrium for initial data, which
+TreeGRRMHD needs for cold neutron stars. It lives here rather than in the
+initial-data code because it depends on the EOS alone and needs the table's
+conventions. Three designs were rejected on the way, all on the same day:
+
+- **A root of the fitted μ̃** on the cold edge, which needs no raw table and
+  would run in a kernel: μ̃ is off from the tables' `munu` by MeV
+  ([CODE.md](CODE.md#β-equilibrium) has the numbers).
+- **A root of `munu` at each density, the least ∫ munu dYₑ among several**
+  (`beta_equilibrium(table, eos, ρ★)`, in the first version of the PR). That is
+  the equilibrium at fixed density, and TreeGRRMHD found p falling with ρ at
+  every switch between roots: 13.6 % on DD2 at log ρ = 8.32, and on SFHo at
+  8.04, 8.27, 9.00 (−18 %) and 11.10. In a star the composition is the one of
+  least Gibbs energy at fixed pressure. The same version took the Hempel tables'
+  ε to be consistent with `munu`; the ~0.5 MeV difference it put down to
+  difference-quotient noise is the electron's rest mass.
+- **The lower convex hull of the energy, then of the free energy, against
+  1/ρ★.** Equivalent in exact thermodynamics, but the hull's slopes missed the
+  EOS's pressure by up to ~10 % at its 2 to 27 jumps per table, from the tables'
+  local inconsistency between ε and their chemical potentials; the energy, as
+  opposed to the free energy, also gave negative-pressure jumps where matter at
+  T_min is not degenerate.
+
+The design kept selects the least g at each pressure in the fitted EOS's own p
+and g, and builds μ_ν from `mu_e − muhat` with one offset per table, since
+O'Connor–Ott LS220's `munu` drops its −Q below ~10⁸ g/cm³.
 
 ## Discipline in `core/`
 
