@@ -81,9 +81,10 @@ Everything in `src/core/` is kernel-side and runs on GPUs. It must stay
   [CODE.md § Data model and units](CODE.md#data-model-and-units)).
 - **Measuring allocations**: use a *top-level* helper taking concrete arguments;
   see `test/testutil.jl` ([CODE.md § Allocation gates](CODE.md#allocation-gates)).
-- `--check-bounds=yes` makes the allocation gates genuinely fail. They are
-  skipped there and run in a dedicated CI job instead
-  ([CODE.md § Allocation gates](CODE.md#allocation-gates)).
+- The allocation gates hold under `--check-bounds=yes` too, since TreeGRRMHD runs
+  its suite that way; only coverage skips them. A stack buffer must not let
+  its bounds check capture it, or it escapes to the heap there
+  ([CODE.md § Discipline in `core/`](CODE.md#discipline-in-core)).
 - **Comparing against the C++**: match its sampling
   ([CODE.md § Validation against the C++](CODE.md#validation-against-the-c)).
 - **Analytic EOSs have κ = 1** ([README § Analytic EOSs](README.md#analytic-eoss)).
