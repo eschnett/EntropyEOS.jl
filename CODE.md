@@ -17,6 +17,7 @@ the method. How the design got here is in [HISTORY.md](HISTORY.md).
   - [Level 2: physics](#level-2-physics)
   - [Flags](#flags)
 - [β-equilibrium](#β-equilibrium)
+- [Composition](#composition)
 - [Discipline in `core/`](#discipline-in-core)
 - [Deliberate deviations from the C++](#deliberate-deviations-from-the-c)
 - [Threading](#threading)
@@ -31,7 +32,8 @@ the method. How the design got here is in [HISTORY.md](HISTORY.md).
 ## Scope
 
 Only the run-time path a hydro code calls: load a table, check it, evaluate it,
-and invert it; plus the one piece of initial data that depends on the EOS alone,
+and invert it, and look up its [composition](#composition) for neutrino rates;
+plus the one piece of initial data that depends on the EOS alone,
 [cold β-equilibrium](#β-equilibrium).
 
 Table *repair* is deliberately not included — it is an offline activity
@@ -78,6 +80,7 @@ src/core/            kernel-side: allocation-free, exception-free, generic in T
   bspline_eval.jl    uniform cubic B-spline evaluation, value and derivatives
   adapter_eval.jl    the designed domain extensions, then evaluate() and srange()
   adapt.jl           Adapt rules and explicit scalar-type narrowing
+  composition_eval.jl   the composition view, trilinear in the raw table's grid
   analytic_eos.jl    IdealGasEOS and HybridEOS: closed-form potentials
   prim2con.jl        primitives to conserved, closed form
   con2prim.jl        conserved to primitives: Newton, cold seed, bracket scan, fallback
@@ -89,6 +92,7 @@ src/host/            owns memory, may throw, never needed on a device
   bspline_fit.jl     banded LU and the not-a-knot fit
   adapter_build.jl   validate, fit, derive κ, audit monotonicity
   beta_equilibrium.jl   cold neutrinoless β-equilibrium, for initial data
+  composition_build.jl  the composition's conventions, resolved once per table
   check.jl           table diagnostics
   synthetic.jl       an analytic ideal gas, and deliberate defect injectors
   analytic_eos.jl    the analytic EOSs' validating constructors and GPP constants
@@ -662,6 +666,131 @@ counterpart.
   drop, and the slice's g is held level.
 - The analytic EOSs have no Yₑ dependence and no chemical potentials, and get no
   method: the caller chooses Yₑ, and `polytropic_entropy` gives the entropy.
+
+## Composition
+
+`CompositionTable(raw, eos)` builds the table's composition once, and
+`composition(cv, ρ★, T_MeV, yₑ)` returns it at one state in a kernel: μ_e, μ̂,
+μ_ν, the mass fractions X_n, X_p, X_α, X_h, X_l, and the mean heavy nucleus
+Ā, Z̄. It is for TreeGRRMHD's leakage rates (their `RJS96Rates`; EOS-12 in
+their requirements). The C++ has no counterpart. It lives here, like the
+[β-equilibrium](#β-equilibrium), because the tables differ in conventions that
+are the EOS's knowledge, and ρ★ is the view's coordinate, not the table's.
+
+- **One convention for every table**, resolved at build time.
+  - μ_e includes mₑc², as every table's `mu_e` does.
+  - μ̂ = `muhat − munu_offset`, so that it always includes Q = m_n − m_p and
+    μ_ν = μ_e − μ̂ exactly; μ_ν is not interpolated from `munu`. The offset is
+    the median of `munu − (mu_e − muhat)` on the coldest row, as in
+    `cold_beta_slice`, without its energy check, and must be 0 or −Q to within
+    10 keV unless given. `q_np(cv)` is CODATA's Q, 1.29333236 MeV, so that rate
+    code does not hard-code another: the nucleons' own degeneracy, without rest
+    masses, is (μ̂ − Q)/T (RJS96's Pauli blocking), while η_ν = μ_ν/T needs no
+    Q.
+  - Measured at every node of the four tables (2026-11-25), the offset does not
+    depend on temperature, and `muhat = mu_n − mu_p` to round-off:
+
+    | table | `munu − (mu_e − muhat)` | max \|μ_ν − `munu`\| at the nodes |
+    | --- | --- | --- |
+    | DD2, SFHo, SRO LS220 | 0, every T | 9·10⁻¹³ MeV |
+    | LS220 (O'Connor–Ott) | −1.293333 (−Q to 0.6 eV) above 10⁸ g/cm³, 0 below | 8·10⁻¹¹ MeV, except 88 nodes |
+
+    Below 10⁸ g/cm³ O'Connor–Ott LS220's `munu` lacks the −Q, as for the
+    slice; μ_ν follows `mu_e − muhat` there too. The 88 nodes are the next
+    bullet's.
+- **O'Connor–Ott LS220 is noisy where its nuclei dissolve.** At log ρ
+  12.8–14.3, at Yₑ from 0.035 to 0.55, single nodes sit off both their neighbours
+  along ρ, in the chemical potentials and the composition at once. At
+  Yₑ = 0.046 on the coldest row, `muhat` runs 41.4, −3.0, 43.7 MeV and `Xh`
+  0.35, 0.43, 0.20, 0.63, 0.34, 0 over consecutive densities from
+  log ρ = 13.82, and ∂F/∂Yₑ from ε and s swings between −124 and +206 MeV
+  where the μ's give ~45. Its own `munu` disagrees with `mu_e − muhat − Q` by
+  up to ~10 MeV at 88 of these nodes (log ρ 13.99–14.05, T ≤ 0.3 MeV,
+  Yₑ 0.046–0.067); that is a symptom, not the defect, since `munu` enters only
+  through a median. Counted as nodes off the mean of their two neighbours,
+  while those agree, by 2 MeV (μ), 0.05 (X), 0.003 (log ε) or 0.01 (log p),
+  which a phase boundary, one kink, does not trigger (2026-11-25):
+
+  | field | O'Connor–Ott LS220 | SRO LS220 | DD2 | SFHo |
+  | --- | --- | --- | --- | --- |
+  | `mu_e` | 9 | 0 | 0 | 0 |
+  | `muhat` | 59 | 107 | 371 | 296 |
+  | `Xh` | 102 | 0 | 116 | 48 |
+  | `Xn` | 95 | 0 | 59 | 0 |
+  | `logpress` | 81 | 0 | 42 | 41 |
+
+  The other tables' outliers lie elsewhere and alone: the Hempel seam's
+  pressure at log ρ ≈ 7.1, SFHo's `muhat` at Yₑ = 0.5 and low density, DD2's
+  `Xh` at T 8–19 MeV, SRO's `muhat` at log ρ 13.76–13.96, Yₑ ≤ 0.17, which
+  overlaps its genuine phase transitions; none was examined further. Only on
+  O'Connor–Ott LS220 do μ and composition go wrong together, in the region
+  where the LS model is least reliable and where `EOSPoint.μ̃` is worst.
+  - **Effects.** The hydro EOS fits ε and s, in which this table has no more
+    outliers than DD2 or SFHo. The cold β-equilibrium is clamped at the
+    table's lowest Yₑ through this range, and a `muhat` outlier only moves μ_ν
+    further from its root. The leakage rates are affected: `Xh` and `Xn`
+    outliers reach T = 13.5 MeV at log ρ 12.8–14.1, which merger remnants
+    visit, and trilinear interpolation spreads each over its neighbouring
+    cells, changing the heavy-nucleus opacity locally by up to a factor of
+    ~3. The matter is optically thick there, so the effect on luminosities is
+    probably small; it is unmeasured.
+  - **Not repaired.** Repair is out of scope here ([Scope](#scope)), and
+    smoothing across where the nuclei dissolve would invent physics while
+    leaving ε, s and p as they are. For production with LS220 physics, use
+    SRO LS220, the same model re-tabulated.
+- **X_l** sums the light clusters other than α: `Xd + Xt + X3he + X4li` on the
+  Hempel tables, `Xl` on SRO, nothing on O'Connor–Ott LS220. Without it the
+  four classic species miss up to 34 % of the mass on DD2 and SFHo, 30 % at
+  log ρ 11–13, T 3–10 MeV, Yₑ 0.1–0.3, and 7 % on SRO. What RJS96 does with
+  it is the rates' decision. The fractions are clamped to [0, 1] (SRO has
+  values down to −7·10⁻¹⁵) and not renormalized.
+- **Ā and Z̄ are X_h-weighted** over the cell's corners,
+  Σ wᵢ X_h,ᵢ Āᵢ / Σ wᵢ X_h,ᵢ, so that X_h·Ā and X_h·Z̄ are the trilinear
+  interpolants of the products. Where `Xh = 0` the tables fill Ā and Z̄ with
+  1 and 1 (Hempel), 4 and 1.8 (O'Connor–Ott), or 1 and Yₑ (SRO); trilinear
+  interpolation of Ā itself would mix those with real nuclei. The build stores
+  1 and 0 there, and they never enter. The ratio is clamped to the range of
+  the corners that contribute: in Float32 a subnormal denominator could put it
+  anywhere. Below `floatmin(T)` the result is X_h = 0, Ā = 1, Z̄ = 0, so the
+  fallback appears only next to X_h = 0, X_h·g(Ā, Z̄) is continuous for any g
+  bounded on real nuclei, and X_h·Ā is exact to floatmin·Ā absolutely. A
+  device that flushes subnormals takes the fallback where the host does not,
+  so Ā alone can differ there; X_h·Ā cannot.
+- **Trilinear, not a B-spline.** The mass fractions switch on and off across
+  phase boundaries, and a cubic fit would overshoot below 0 and break their
+  sum; trilinear keeps both, needs no fit, and is what leakage codes do. No
+  derivatives are needed. Interpolation is in (log₁₀ρ, log₁₀T, Yₑ) on the raw
+  table's grid, with log₁₀ρ = log₁₀ρ★ − log₁₀κ relabelled exactly as the
+  EOS's spline is. Each coordinate is clamped to the raw table's axes, which
+  may reach one T row above the EOS's box (`trim_t_hi_rows`); there is no
+  extension and no flag, since `EOSPoint.flags` already marks a state outside
+  the box. The temperature is `EOSPoint.T_MeV`, not T̂.
+- **Opt-in and separate.** Nine fields per node are 180 MB in Float64 on DD2
+  and 300 MB on SRO, about four times the fitted EOS's two coefficient arrays
+  (43 MB on DD2); a code that does not ask for
+  them carries none. They are interleaved as `c[field, iρ, jT, kYₑ]`, so that
+  one lookup reads eight contiguous runs. `Adapt` and `narrow` work as for
+  `EOSTableView`.
+- **Table identity.** A composition paired with another table's EOS would
+  convert ρ★ with the wrong κ and read the wrong composition, silently. κ and
+  the box do not reliably identify a table (DD2 and SFHo share their T and
+  Yₑ axes and their lowest density, and nothing keeps two κ apart), so both views carry a `UInt64`
+  `fingerprint`: a hash of every value of the raw table's axes and `logenergy`
+  (not `Base.hash` of the arrays, which samples a large one), taken by
+  `build_eos` before any trim. `narrow` and `adapt` carry it, and `matches(cv,
+  eos)` compares it; it is an identity within one session, not a stable
+  checksum. `CompositionTable(raw, eos)` refuses a raw table with another
+  fingerprint, so a composition from the unrepaired DD2 does not match an EOS
+  from the repaired file, although their composition datasets are identical.
+  `EOSTableView` gained the field for this, and a view built by hand has 0,
+  which matches nothing.
+- **Testing.** `composition_index(cv, fi, fj, fk)` takes fractional grid
+  indices, where a node is the stored value bitwise; the physical entry point
+  cannot hit a node exactly through `log10`. The synthetic table's composition
+  (`SyntheticOptions(; with_composition=true)`) is multilinear, so it is
+  reproduced to 1.4·10⁻¹⁴ anywhere. On the real tables μ_ν at the cold slice's
+  states is below 4·10⁻¹² MeV, and on Metal the kernel in grid coordinates is
+  bitwise the host's.
 
 ## Discipline in `core/`
 

@@ -50,6 +50,14 @@ The tables' `mu_e` includes it and their ε does not, which is what the cold
 const M_ELECTRON_MEV = 0.51099895000
 
 """
+Neutron–proton mass difference `m_n − m_p` in MeV. CODATA 2018.
+
+The composition's μ̂ always includes it, so that μ_ν = μ_e − μ̂; the nucleons'
+own degeneracy, without rest masses, is (μ̂ − Q)/T. See [`q_np`](@ref).
+"""
+const Q_NP_MEV = 1.29333236
+
+"""
 Default baryon mass for converting between per-baryon and per-gram quantities.
 
 The convention is per table family: some formats carry it explicitly, others

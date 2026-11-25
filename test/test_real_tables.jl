@@ -116,12 +116,85 @@ function _test_beta_equilibrium(name, t, eos)
     return nothing
 end
 
+# The composition (CODE.md, "Composition"): its conventions as surveyed on
+# these tables, the nodes, μ_ν = 0 on the cold β-equilibrium, and the edge of
+# the heavy nuclei.
+function _test_composition(name, t, eos)
+    E = EntropyEOS
+    Q = E.Q_NP_MEV
+    v = EOSTableView(eos)
+    ct = CompositionTable(t, eos)          # every table builds without help
+    cv = CompositionView(ct)
+    @test matches(ct, eos)
+    oconnor_ott = name == "LS220"
+    @test ct.light_fields == (oconnor_ott ? String[] : name == "SRO LS220" ? ["Xl"] : ["Xd", "Xt", "X3he", "X4li"])
+    if oconnor_ott
+        @test abs(ct.munu_offset + Q) <= 1e-5      # −1.293333; its own Q
+    else
+        @test abs(ct.munu_offset) <= 1e-6
+    end
+
+    # Every node: the datasets, and μ_ν = the table's munu, except where
+    # O'Connor–Ott's munu lacks −Q (below 10⁸ g/cm³).
+    nx, nu, ny = size(t)
+    mue, muh, munu = field(t, "mu_e"), field(t, "muhat"), field(t, "munu")
+    Xn, Xh, Abar = field(t, "Xn"), field(t, "Xh"), field(t, "Abar")
+    worst = 0.0
+    nodes_ok = true
+    nbad = 0
+    for k in 1:ny, j in 1:nu, i in 1:nx
+        r = E.composition_index(cv, Float64(i - 1), Float64(j - 1), Float64(k - 1))
+        want = munu[i, j, k] + (oconnor_ott && t.logρ[i] < 8 ? ct.munu_offset : 0.0)
+        δ = abs(r.μ_ν - want)
+        # O'Connor–Ott LS220's munu is inconsistent with its mu_e − muhat at 88
+        # nodes in the noisy band where its nuclei dissolve (CODE.md,
+        # "Composition"), cold and neutron-rich.
+        if oconnor_ott && δ > 1e-5 && 13.9 <= t.logρ[i] <= 14.1 && t.logT[j] <= -0.5 && t.Yₑ[k] <= 0.07
+            nbad += 1
+            continue
+        end
+        worst = max(worst, δ)
+        nodes_ok &= r.μ_e === mue[i, j, k] && r.μ̂ === muh[i, j, k] - ct.munu_offset &&
+                    r.X_n === clamp(Xn[i, j, k], 0.0, 1.0) && r.X_h === clamp(Xh[i, j, k], 0.0, 1.0) &&
+                    (r.X_h > 0 ? r.Ā === max(Abar[i, j, k], 0.0) : r.Ā === 1.0)
+    end
+    @test nodes_ok
+    @info "$name: munu_offset = $(ct.munu_offset) MeV, max |μ_ν − munu| at the nodes = $worst MeV" nbad
+    @test worst <= (oconnor_ott ? 1e-5 : 1e-9)
+    @test nbad == (oconnor_ott ? 88 : 0)
+
+    # μ_ν = 0 on the cold β-equilibrium: at T_min to round-off, and at the
+    # temperature the slice's states evaluate to within that difference.
+    sl = oconnor_ott ? cold_beta_slice(t, eos; energy_offset=-Q + E.M_ELECTRON_MEV) : cold_beta_slice(t, eos)
+    Tmin = exp10(t.logT[1])
+    worst_min = worst_pt = 0.0
+    for (ρ★, y, s, cl) in zip(sl.ρ★, sl.yₑ, sl.s, sl.clamped)
+        cl && continue
+        worst_min = max(worst_min, abs(composition(cv, ρ★, Tmin, y).μ_ν))
+        pt = evaluate(v, ρ★, s, y, NaN)
+        r = composition(cv, ρ★, pt.T_MeV, y)
+        fi, fk = (log10(ρ★) - cv.x0) / cv.hx, (y - cv.y0) / cv.hy
+        slope = abs(E.composition_index(cv, fi, 1.0, fk).μ_ν - E.composition_index(cv, fi, 0.0, fk).μ_ν) / cv.hu
+        du = max(log10(pt.T_MeV) - t.logT[1], 0.0)
+        worst_pt = max(worst_pt, abs(r.μ_ν) - du * slope)
+    end
+    @info "$name: |μ_ν| on the cold slice: at T_min $worst_min MeV, at the states' T $worst_pt MeV beyond the T bound"
+    @test worst_min <= 1e-6
+    @test worst_pt <= 1e-6
+
+    @testset "the edge of the heavy nuclei" begin
+        _test_comp_edge(cv, StableRNG(1204))
+    end
+    return fingerprint(eos)
+end
+
 if isempty(TABLE_DIR) || !isdir(TABLE_DIR)
     @info "real-table tests skipped (set ENTROPYEOS_TABLE_DIR to enable)"
 else
     @testset "real tables" begin
         E = EntropyEOS
         audits = Dict{String,Int}()
+        fingerprints = Dict{String,UInt64}()
 
         # The small cropped LS220 fixture, if present: cheap, and it carries
         # LS220's three genuine non-finite cs2/gamma points.
@@ -168,6 +241,9 @@ else
                 if has_field(t, "mu_e") && has_field(t, "muhat")
                     @testset "β-equilibrium" begin
                         _test_beta_equilibrium(tab.name, t, eos)
+                    end
+                    @testset "composition" begin
+                        fingerprints[tab.name] = _test_composition(tab.name, t, eos)
                     end
                 end
 
@@ -246,6 +322,9 @@ else
                 @test nfalse == 0
             end
         end
+
+        # No two tables are taken for one another, the repaired DD2 included.
+        @test allunique(values(fingerprints))
 
         # Repair is an offline C++ step, but its effect must be visible here:
         # the repaired DD2 has measurably fewer entropy-monotonicity violations

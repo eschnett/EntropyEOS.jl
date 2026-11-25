@@ -132,6 +132,26 @@ end
 """Field names, in insertion order."""
 field_names(t::RawTable) = t.field_names
 
+# The identity `fingerprint` reports: every value of the axes and of
+# `logenergy`, not `Base.hash` of the arrays, which samples a large array.
+function table_fingerprint(t::RawTable)
+    h = hash(:EntropyEOS_RawTable)
+    for a in (t.logρ, t.logT, t.Yₑ)
+        h = hash(length(a), h)
+        for x in a
+            h = hash(Float64(x), h)
+        end
+    end
+    # A table without it fails to build anyway; the axes alone then serve.
+    if has_field(t, "logenergy")
+        for x in field(t, "logenergy")
+            h = hash(Float64(x), h)
+        end
+    end
+    # 0 means "unknown" to `matches`.
+    return h == 0 ? UInt64(1) : UInt64(h)
+end
+
 """
     add_attribute!(t, name, value)
 

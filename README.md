@@ -133,6 +133,23 @@ r.ρ★, r.yₑ, r.s, r.point.h            # FLAG_CLAMP_YE in r.flags if outside
 "Cold" means the table's lowest temperature. See
 [CODE.md § β-equilibrium](CODE.md#β-equilibrium).
 
+### Composition
+
+For neutrino rates, `CompositionTable` resolves a table's chemical potentials
+and composition into one convention, once, and `composition` evaluates them in a
+kernel: μ_e, μ̂, μ_ν in MeV, the mass fractions of free neutrons and protons, α,
+heavy nuclei and light clusters, and the mean heavy nucleus. It is opt-in, since
+it carries nine more fields per node:
+
+```julia
+ct = CompositionTable(table, eos)      # throws unless eos was built from table
+cv = CompositionView(ct)
+c = composition(cv, ρ★, pt.T_MeV, yₑ)  # pt = evaluate(v, ρ★, s, yₑ, …)
+c.μ_ν, c.X_n, c.X_h, c.Ā               # μ̂ includes Q = q_np(cv) on every table
+```
+
+See [CODE.md § Composition](CODE.md#composition).
+
 ### Repairing a table
 
 Published tables are often not monotone in T, which the adapter needs.
@@ -202,7 +219,8 @@ isempty(idx) || c2p_finish!(backend, 256)(out, idx, st, cin, dv, opts; ndrange=l
 
 The run-time path is complete and tested: table loading and checking, the
 B-spline fit, the adapter, `prim2con`, `con2prim`, the projection that never
-fails and the policy on top of it, plus the analytic EOSs. Roughly 32,000
+fails and the policy on top of it, plus the analytic EOSs, cold β-equilibrium
+and the composition for neutrino rates. Roughly 32,000
 assertions pass.
 
 Version 2.0.0 replaced 1.x's single policy layer by these two levels, which

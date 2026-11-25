@@ -156,6 +156,10 @@ struct EOSTableView{T<:AbstractFloat,A<:AbstractArray{T,3}} <: AbstractEOS{T}
     ext_slope_floor_L::T
     cs²_ext_cap::T
     max_iter::Int32
+
+    # Identity of the raw table the view was built from, for pairing it with a
+    # `CompositionView`; 0 when unknown. `narrow` and `adapt` carry it unchanged.
+    fingerprint::UInt64
 end
 
 logρ_bounds(v::EOSTableView) = (v.x_lo, v.x_hi)

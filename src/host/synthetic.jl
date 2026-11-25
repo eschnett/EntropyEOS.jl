@@ -109,6 +109,9 @@ end
 Grid, gas parameters and the defects to inject. Defects are applied in the
 order the fields are declared below: flatten, wiggle, offset, stiffen, seam,
 seed, setvalue.
+
+`with_aux_fields` adds `cs2`, `gamma` and `mu_e`; `with_composition` adds the
+datasets [`CompositionTable`](@ref) reads (see [`make_synthetic_table`](@ref)).
 """
 Base.@kwdef struct SyntheticOptions
     nρ::Int = 40
@@ -125,6 +128,7 @@ Base.@kwdef struct SyntheticOptions
     T₀_MeV::Float64 = 0.05
     ρ₀_gcc::Float64 = 1.0e16
     with_aux_fields::Bool = false
+    with_composition::Bool = false
     flatten::Vector{FlattenDefect} = FlattenDefect[]
     wiggle::Vector{WiggleDefect} = WiggleDefect[]
     offset::Vector{OffsetDefect} = OffsetDefect[]
@@ -385,6 +389,18 @@ Stored fields are `"logenergy" = log10(ε + energy_shift)`, `"entropy" = s` and
 `"mu_e"` -- which the check/repair pipeline never interprets, so a defect
 planted in one of them can only ever be reported as non-finite, never as fatal.
 
+With `opts.with_composition`, the datasets a [`CompositionTable`](@ref) reads
+follow: `mu_e`, `muhat`, `munu`, `Xn`, `Xp`, `Xa`, `Xh`, `Xl`, `Abar`, `Zbar`
+(replacing the auxiliary `mu_e`). They are not physics. Each is multilinear in
+`(a, b, c)`, the table's `(log₁₀ρ, log₁₀T, Yₑ)` mapped onto [0, 1], so that
+trilinear interpolation reproduces them exactly anywhere in the box:
+
+    mu_e  = 5 + 20a + 3b + 40c + 2abc     (MeV)
+    muhat = 2 + 30a − b + 10c             (MeV; munu = mu_e − muhat)
+    Xn = 0.1 + 0.2a,  Xp = 0.1 + 0.1b,  Xa = 0.1 + 0.1c,  Xl = 0.05ab
+    Xh = 1 − Xn − Xp − Xa − Xl            (between 0.2 and 0.7)
+    Abar = 50 + 10a + 20c + 5ab,  Zbar = 20 + 5b + 8c
+
 Defects are applied to the stored representation, after every field is in
 place, in the fixed order flatten, wiggle, offset, stiffen, seam, seed, setvalue,
 each list running to completion before the next begins.
@@ -447,6 +463,8 @@ function make_synthetic_table(opts::SyntheticOptions=SyntheticOptions())
         add_field!(table, "mu_e", mu_e)
     end
 
+    opts.with_composition && add_synthetic_composition!(table)
+
     apply_flatten!(table, opts.flatten)
     apply_wiggle!(table, opts.wiggle)
     apply_offset!(table, opts.offset)
@@ -455,6 +473,31 @@ function make_synthetic_table(opts::SyntheticOptions=SyntheticOptions())
     apply_seed!(table, opts.seed)
     apply_setvalue!(table, opts.setvalue)
 
+    return table
+end
+
+# The composition datasets documented in `make_synthetic_table`.
+function add_synthetic_composition!(table::RawTable)
+    norm(axis, i) = (axis[i] - axis[1]) / (axis[end] - axis[1])
+    abc = [(norm(table.logρ, i), norm(table.logT, j), norm(table.Yₑ, k)) for i in eachindex(table.logρ),
+           j in eachindex(table.logT), k in eachindex(table.Yₑ)]
+    f(g) = map(t -> g(t...), abc)
+    mu_e = f((a, b, c) -> 5 + 20a + 3b + 40c + 2a * b * c)
+    muhat = f((a, b, c) -> 2 + 30a - b + 10c)
+    Xn = f((a, b, c) -> 0.1 + 0.2a)
+    Xp = f((a, b, c) -> 0.1 + 0.1b)
+    Xa = f((a, b, c) -> 0.1 + 0.1c)
+    Xl = f((a, b, c) -> 0.05a * b)
+    add_field!(table, "mu_e", mu_e)
+    add_field!(table, "muhat", muhat)
+    add_field!(table, "munu", mu_e .- muhat)
+    add_field!(table, "Xn", Xn)
+    add_field!(table, "Xp", Xp)
+    add_field!(table, "Xa", Xa)
+    add_field!(table, "Xh", 1 .- Xn .- Xp .- Xa .- Xl)
+    add_field!(table, "Xl", Xl)
+    add_field!(table, "Abar", f((a, b, c) -> 50 + 10a + 20c + 5a * b))
+    add_field!(table, "Zbar", f((a, b, c) -> 20 + 5b + 8c))
     return table
 end
 

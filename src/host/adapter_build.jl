@@ -90,6 +90,18 @@ EOSTableView(t::EOSTable) = t.view
 """κ, the baryon-mass rescaling factor (≤ 1)."""
 κ(t::EOSTable) = t.view.κ
 
+"""
+    fingerprint(x) -> UInt64
+
+The identity of the raw table that `x` -- an `EOSTable`, an `EOSTableView`, a
+[`CompositionTable`](@ref) or a [`CompositionView`](@ref) -- was built from: a
+hash of the table's axes and its `logenergy` dataset. It identifies a table
+within one Julia session; it is not a stable checksum. A view built by hand
+has 0. See [`matches`](@ref).
+"""
+fingerprint(t::EOSTable) = t.view.fingerprint
+fingerprint(v::EOSTableView) = v.fingerprint
+
 # Implementation lands in milestone M7:
 #   build_eos(table::RawTable, opts::BuildOptions = BuildOptions()) -> EOSTable
 
@@ -338,7 +350,10 @@ absent. It does not repair anything -- that is an offline step, and
 function build_eos(t::RawTable{T}, opts::BuildOptions=BuildOptions()) where {T}
     trim = opts.trim_t_hi_rows
     trim >= 0 || throw(ArgumentError("build_eos: trim_t_hi_rows must be >= 0"))
-    trim == 0 && return build_box(t, opts)
+    # Of the table as given, not as trimmed: a composition is built from the
+    # same file, whole.
+    fp = table_fingerprint(t)
+    trim == 0 && return build_box(t, opts, fp)
     nT(t) >= trim + 4 ||
         throw(ArgumentError("build_eos: T axis has fewer than 4 points after trimming $trim row(s)"))
     # The same messages as the untrimmed path for a missing field or attribute;
@@ -348,11 +363,11 @@ function build_eos(t::RawTable{T}, opts::BuildOptions=BuildOptions()) where {T}
     has_attribute(t, "energy_shift") ||
         throw(ArgumentError("build_eos: table has no 'energy_shift' attribute"))
     trimmed = crop_table(t, 1:nρ(t), 1:(nT(t) - trim), 1:nYₑ(t); fields=("entropy", "logenergy"))
-    return build_box(trimmed, opts)
+    return build_box(trimmed, opts, fp)
 end
 
 # `build_eos` on the already trimmed table.
-function build_box(t::RawTable{T}, opts::BuildOptions) where {T}
+function build_box(t::RawTable{T}, opts::BuildOptions, fp::UInt64) where {T}
     nρ_, nT_, nYₑ_ = nρ(t), nT(t), nYₑ(t)
     nρ_ >= 4 || throw(ArgumentError("build_eos: ρ axis has fewer than 4 points"))
     nT_ >= 4 || throw(ArgumentError("build_eos: T axis has fewer than 4 points"))
@@ -407,6 +422,6 @@ function build_box(t::RawTable{T}, opts::BuildOptions) where {T}
 
     view = EOSTableView(σ_final, L_final, κ, shift_hat, conv_t, inv_c², x_lo, x_hi, u_lo, u_hi, y_lo, y_hi,
                         x_ext_lo, x_ext_hi, u_ext_lo, u_ext_hi, T(opts.ext_slope_floor_σ),
-                        T(opts.ext_slope_floor_L), T(opts.cs²_ext_cap), Int32(50))
+                        T(opts.ext_slope_floor_L), T(opts.cs²_ext_cap), Int32(50), fp)
     return EOSTable{T}(view, m_B_star_g, opts.m_B_table_g, audit)
 end

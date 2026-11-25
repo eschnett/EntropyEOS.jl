@@ -22,3 +22,26 @@ transitions between them explicit.
 Modules = [EntropyEOS]
 Pages = ["host/beta_equilibrium.jl"]
 ```
+
+## Composition
+
+The chemical potentials, mass fractions and mean heavy nucleus of a table, for
+neutrino rates, evaluated in a kernel. Build a [`CompositionTable`](@ref) from
+the raw table and the EOS built from it, once; then call
+[`composition`](@ref) next to `evaluate`, at the temperature the recovery
+landed on:
+
+```julia
+ct = CompositionTable(table, eos)
+matches(ct, eos) || error("composition and EOS are from different tables")
+cv = CompositionView(ct)              # adapt(CuArray, cv) for a device
+pt = evaluate(v, ρ★, s, yₑ, NaN)
+c = composition(cv, ρ★, pt.T_MeV, yₑ)
+η_ν = c.μ_ν / pt.T_MeV
+η̂_nucleons = (c.μ̂ - q_np(cv)) / pt.T_MeV   # without rest masses
+```
+
+```@autodocs
+Modules = [EntropyEOS]
+Pages = ["core/composition_eval.jl", "host/composition_build.jl"]
+```
