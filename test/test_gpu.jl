@@ -106,6 +106,76 @@ else
             @inbounds outf[i] = o.policy_flags
         end
 
+        @eval @kernel function _gpu_comp!(out, @Const(ρs), @Const(Ts), cv, yₑ)
+            i = @index(Global)
+            r = EntropyEOS.composition(cv, ρs[i], Ts[i], yₑ)
+            @inbounds out[1, i] = r.μ_ν
+            @inbounds out[2, i] = r.X_h
+            @inbounds out[3, i] = r.X_h * r.Ā
+            @inbounds out[4, i] = r.X_n
+        end
+
+        @eval @kernel function _gpu_comp_index!(out, @Const(fis), @Const(fjs), cv, fk)
+            i = @index(Global)
+            r = EntropyEOS.composition_index(cv, fis[i], fjs[i], fk)
+            @inbounds out[1, i] = r.μ_ν
+            @inbounds out[2, i] = r.X_h
+            @inbounds out[3, i] = r.X_h * r.Ā
+            @inbounds out[4, i] = r.X_n
+        end
+
+        @testset "GPU composition ($GPU_BACKEND, $T)" for T in GPU_ELTYPES
+            E = EntropyEOS
+            tbl = make_synthetic_table(SyntheticOptions(; with_composition=true))
+            # An edge of the heavy nuclei, so that the fallback runs too.
+            Xh = copy(field(tbl, "Xh"))
+            Xh[1:15, :, :] .= 0
+            Xh[16, :, 1:2:end] .= 1e-42
+            add_field!(tbl, "Xh", Xh)
+            cv = E.narrow(CompositionView(CompositionTable(tbl, E.build_eos(tbl))), T)
+            dcv = Adapt.adapt(DEVARRAY, cv)
+            n = 1024
+            rng = StableRNG(1203)
+            _, nx, nu, ny = size(cv.c)
+
+            # In grid coordinates: no log10, so host and device differ only by
+            # contraction into fused multiply-adds.
+            fis = T[12 + 6 * rand(rng) for _ in 1:n]
+            fjs = T[(nu - 1) * rand(rng) for _ in 1:n]
+            fk = T(ny ÷ 2) + T(0.25)
+            outc = zeros(T, 4, n)
+            _gpu_comp_index!(CPU(), 64)(outc, fis, fjs, cv, fk; ndrange=n)
+            KernelAbstractions.synchronize(CPU())
+            dout = DEVARRAY(zeros(T, 4, n))
+            _gpu_comp_index!(BACKEND, 64)(dout, DEVARRAY(fis), DEVARRAY(fjs), dcv, fk; ndrange=n)
+            KernelAbstractions.synchronize(BACKEND)
+            outg = Array(dout)
+            @test all(isfinite, outg)
+            # The fallback runs. Where X_h is subnormal a device may flush it to
+            # zero and take the fallback where the host does not, so Ā alone is
+            # compared only through X_h·Ā, which differs by floatmin·Ā at most.
+            @test count(iszero, outc[2, :]) > 0
+            rel = maximum(abs.(outg .- outc) ./ max.(abs.(outc), one(T)))
+            @info "GPU composition_index: max difference from the host kernel" rel
+            @test rel <= 100 * eps(T)
+
+            # Physical coordinates, through log10.
+            ρs = T[exp10(cv.x0 + cv.hx * (nx - 1) * rand(rng)) for _ in 1:n]
+            Ts = T[exp10(cv.u0 + cv.hu * (nu - 1) * rand(rng)) for _ in 1:n]
+            yₑ = T(0.3)
+            outc = zeros(T, 4, n)
+            _gpu_comp!(CPU(), 64)(outc, ρs, Ts, cv, yₑ; ndrange=n)
+            KernelAbstractions.synchronize(CPU())
+            dout = DEVARRAY(zeros(T, 4, n))
+            _gpu_comp!(BACKEND, 64)(dout, DEVARRAY(ρs), DEVARRAY(Ts), dcv, yₑ; ndrange=n)
+            KernelAbstractions.synchronize(BACKEND)
+            outg = Array(dout)
+            @test all(isfinite, outg)
+            rel = maximum(abs.(outg .- outc) ./ max.(abs.(outc), one(T)))
+            @info "GPU composition: max difference from the host kernel" rel
+            @test rel < sqrt(eps(T)) * 100
+        end
+
         @testset "GPU ($GPU_BACKEND, $T)" for T in GPU_ELTYPES
             E = EntropyEOS
             tbl = make_synthetic_table()

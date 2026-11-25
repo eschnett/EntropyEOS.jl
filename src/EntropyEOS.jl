@@ -46,6 +46,7 @@ include("core/eos_interface.jl")
 include("core/bspline_eval.jl")
 include("core/adapter_eval.jl")
 include("core/adapt.jl")
+include("core/composition_eval.jl")
 include("core/analytic_eos.jl")
 include("core/prim2con.jl")
 include("core/con2prim.jl")
@@ -58,6 +59,7 @@ include("host/table.jl")
 include("host/bspline_fit.jl")
 include("host/adapter_build.jl")
 include("host/beta_equilibrium.jl")
+include("host/composition_build.jl")
 include("host/check.jl")
 include("host/synthetic.jl")
 include("host/analytic_eos.jl")
@@ -99,6 +101,8 @@ export
     BuildOptions, AdapterAudit, MonotonicityAudit, AuditLoc, EOSTable, build_eos,
     # Initial data
     BetaEquilibrium, ColdBetaJump, ColdBetaSlice, cold_beta_slice, beta_equilibrium,
+    # The composition
+    Composition, CompositionTable, CompositionView, composition, q_np, fingerprint, matches,
     CheckOptions, CheckReport, CheckClassResult, CheckLoc,
     # Synthetic tables
     SyntheticOptions, SeededViolation, FlattenDefect, WiggleDefect, OffsetDefect,

@@ -10,6 +10,7 @@ recorded each item in the documentation.
   - [The EOS interface](#the-eos-interface)
 - [State policy](#state-policy)
 - [β-equilibrium](#β-equilibrium)
+- [Composition](#composition)
 - [Discipline in `core/`](#discipline-in-core)
   - [The one stack buffer](#the-one-stack-buffer)
   - [Two stages](#two-stages)
@@ -343,6 +344,39 @@ conventions. Three designs were rejected on the way, all on the same day:
 The design kept selects the least g at each pressure in the fitted EOS's own p
 and g, and builds μ_ν from `mu_e − muhat` with one offset per table, since
 O'Connor–Ott LS220's `munu` drops its −Q below ~10⁸ g/cm³.
+
+## Composition
+
+2026-11-25 (2.4.0). Added the composition on the device, for TreeGRRMHD's
+leakage rates (their EOS-12). Their first draft returned the raw `muhat`,
+the four classic mass fractions, and Ā, Z̄ interpolated as they are, in the
+EOS's own view. Measured against the tables before writing it, each of those
+was changed:
+
+- **Raw `muhat`** means different things on different tables: O'Connor–Ott
+  LS220's lacks Q and the Hempel and SRO tables' includes it. μ̂ now always
+  includes it, and `q_np` gives the Q to subtract for the nucleons' own
+  degeneracy, which RJS96's Pauli blocking uses; η_ν needs none.
+- **Four mass fractions** miss up to 34 % of the mass on the Hempel tables,
+  in light clusters; X_l was added.
+- **Ā and Z̄ interpolated directly** mix the tables' fill values, where there
+  are no heavy nuclei, with real nuclei. They are X_h-weighted now, with a
+  clamp and a floatmin fallback for Float32.
+- **Arrays in `EOSTableView`** would have charged every user ~180 MB per table
+  for a feature only leakage uses; the composition is a separate, opt-in type.
+- **κ as the composition's identity**, proposed by TreeGRRMHD to refuse a
+  mismatched pair, does not separate tables reliably; a fingerprint of the raw
+  table does, at the cost of one field in `EOSTableView`.
+
+Trilinear interpolation was kept over a B-spline fit, which would overshoot the
+mass fractions at phase boundaries. The requirement's acceptance criterion for
+O'Connor–Ott LS220 below 10⁸ g/cm³ had the sign of Q wrong: there μ_ν is the
+table's `munu` − Q, not + Q. And it assumed μ_ν = `munu` everywhere above;
+88 nodes near log ρ = 14 disagree by up to ~10 MeV. Those were first read as
+errors in `munu` alone; looking further the same day showed `mu_e`, `muhat`,
+`Xh`, `Xn` and the pressure noisy in the whole band where the table's nuclei
+dissolve, and the note was rewritten to say so
+([CODE.md](CODE.md#composition)).
 
 ## Discipline in `core/`
 

@@ -21,6 +21,7 @@ _jet_c2p_finish(v, cin, o, st) = EntropyEOS.con2prim_finish(v, cin, o, st)
 _jet_safe_start(v, cin, o, proj) = EntropyEOS.con2prim_safe_start(v, cin, o, proj)
 _jet_safe_finish(v, cin, o, proj, st) = EntropyEOS.con2prim_safe_finish(v, cin, o, proj, st)
 _jet_policy(v, cin, out, proj, pol) = EntropyEOS.apply_policy(v, cin, out, proj, pol)
+_jet_comp(cv, ρ, T, y) = EntropyEOS.composition(cv, ρ, T, y)
 
 @testset "quality" begin
     @testset "Aqua" begin
@@ -63,6 +64,14 @@ _jet_policy(v, cin, out, proj, pol) = EntropyEOS.apply_policy(v, cin, out, proj,
                 (V, Con2PrimIn{F}, Con2PrimOptions{F}, ProjectionOptions{F}))))
             @test isempty(JET.get_reports(JET.report_opt(_jet_safe_finish,
                 (V, Con2PrimIn{F}, Con2PrimOptions{F}, ProjectionOptions{F}, Con2PrimSafeStage{F}))))
+            # The composition, in both precisions of table.
+            tc = make_synthetic_table(SyntheticOptions(; nρ=8, nT=8, nYₑ=8, with_composition=true))
+            cv = CompositionView(CompositionTable(tc, EntropyEOS.build_eos(tc)))
+            for C in (typeof(cv), typeof(narrow(cv, Float32)))
+                @test isempty(JET.get_reports(JET.report_opt(_jet_comp, (C, F, F, F))))
+            end
+            @test isempty(JET.get_reports(JET.report_opt(_jet_comp, (typeof(narrow(cv, Float32)), Float32, Float32,
+                                                                      Float32))))
             # The analytic EOSs run the same solver, and must be as clean.
             for A in (typeof(IdealGasEOS(; Γ=2.0, K_ref=100.0, s_ref=5.0, s_window=(1.0, 20.0),
                                          ρ_bounds=(1e-10, 1e-2), yₑ_bounds=(0.0, 1.0))),

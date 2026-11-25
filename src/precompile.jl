@@ -23,7 +23,7 @@
 using PrecompileTools: @compile_workload
 
 @compile_workload begin
-    opts = SyntheticOptions(; nρ=5, nT=5, nYₑ=5, with_aux_fields=true)
+    opts = SyntheticOptions(; nρ=5, nT=5, nYₑ=5, with_aux_fields=true, with_composition=true)
     tbl = make_synthetic_table(opts)
     check_table(tbl)
 
@@ -39,6 +39,7 @@ using PrecompileTools: @compile_workload
 
     pt = evaluate(v, ρ, s, yₑ, NaN)
     evaluate(v, ρ, s, yₑ, pt.u_solved)          # the warm path, which dominates
+    composition(CompositionView(CompositionTable(tbl, eos)), ρ, pt.T_MeV, yₑ)
 
     c = prim2con(v, ρ, s, yₑ, 0.8, 0.1ρ, 0.3, pt.u_solved)
     prim2con(v, ρ, s, yₑ, 0.8, SVector(1.0, 0.0, 0.0), SVector(0.0, 0.0, 1.0), pt.u_solved)
