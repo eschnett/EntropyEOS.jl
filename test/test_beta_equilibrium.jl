@@ -98,6 +98,35 @@
         # Followed: mu_e − muhat − Q = 0, so Yₑ = 0.3 + Q/100.
         @test all(≈(0.3 + Q / 100; rtol=1e-12), sl.yₑ)
         @test cold_beta_slice(tbl, eos; munu_offset=0.0, energy_offset=0.0).yₑ[1] ≈ 0.3 rtol = 1e-12
+        # Neither 0 nor −Q: refused.
+        set_mu!((x, y) -> 100 * (y - 0.3); munu=(x, y) -> 100 * (y - 0.3) + 0.5)
+        @test_throws ArgumentError cold_beta_slice(tbl, eos; energy_offset=0.0)
+    end
+
+    @testset "muhat's convention from the ideal gas, not munu" begin
+        # Free nucleons whose ratio makes muhat = 0 include Q, or lack it: the
+        # offset follows them, whatever munu says (O'Connor–Ott LS220's munu
+        # subtracts a further Q above 10⁸ g/cm³).
+        Q = E.Q_NP_MEV
+        mₙ = E.M_NEUTRON_G * E.C_LIGHT_CM_S^2 / E.MEV_TO_ERG
+        r = (mₙ / (mₙ - Q))^1.5
+        set_mu!((x, y) -> 100 * (y - 0.3); munu=(x, y) -> 100 * (y - 0.3) - Q)
+        for (lacks_Q, want) in ((false, 0.0), (true, -Q))
+            tg = deepcopy(tbl)
+            T = [exp10(tg.logT[j]) for i in 1:nρ, j in 1:nT, k in 1:nY]
+            add_field!(tg, "Xp", fill(0.3, nρ, nT, nY))
+            add_field!(tg, "Xn", 0.3 .* r .* (lacks_Q ? ones(nρ, nT, nY) : exp.(-Q ./ T)))
+            sl = cold_beta_slice(tg, eos; energy_offset=0.0)
+            @test sl.munu_offset == want
+            @test sl.munu_mismatch ≈ (lacks_Q ? 0 : 1)
+            @test all(≈(0.3 - want / 100; rtol=1e-12), sl.yₑ)
+        end
+        # Muhat that is neither: refused.
+        tg = deepcopy(tbl)
+        add_field!(tg, "Xp", fill(0.3, nρ, nT, nY))
+        add_field!(tg, "Xn", fill(0.3, nρ, nT, nY))
+        add_field!(tg, "muhat", fill(0.5, nρ, nT, nY))
+        @test_throws ArgumentError cold_beta_slice(tg, eos; energy_offset=0.0)
     end
 
     @testset "the electron-mass check" begin

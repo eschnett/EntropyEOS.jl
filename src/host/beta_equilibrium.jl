@@ -121,11 +121,13 @@ The cold, neutrinoless β-equilibrium slice of `eos`, which must have been built
 from `table`.
 
 **Criterion.** `μ_ν = mu_e − muhat + munu_offset = 0` on the table's coldest
-row, interpolated bilinearly in `log10 ρ` and `Yₑ`. `munu_offset` defaults to
-the median of `munu − (mu_e − muhat)` over that row: 0 on the Hempel and SRO
-tables, `−Q = −1.293` MeV on the O'Connor–Ott LS220 table. Where the table's
-own `munu` disagrees with that, as O'Connor–Ott LS220's does below about
-10⁸ g/cm³, the disagreement is reported in `munu_mismatch` and not followed.
+row, interpolated bilinearly in `log10 ρ` and `Yₑ`. `munu_offset` is 0 if the
+table's `muhat` includes the neutron–proton mass difference `Q`, `−Q` if not;
+by default it is read off the table's free nucleons in their ideal-gas limit,
+as for [`CompositionTable`](@ref), and is 0 on all four real tables. Where the
+table's own `munu` disagrees, as O'Connor–Ott LS220's does above about
+10⁸ g/cm³ by a further `−Q`, the disagreement is reported in `munu_mismatch` and
+not followed.
 
 **Selection.** At `refine` densities per table cell, every upward zero crossing
 of `μ_ν` in `Yₑ`, and a table edge where `μ_ν` points outward, is placed on the
@@ -144,7 +146,8 @@ fails, as O'Connor–Ott LS220 does, throws `ArgumentError` unless
 `energy_offset` is given explicitly.
 
 "Cold" means the table's lowest temperature, not `T = 0`. The table must carry
-`mu_e` and `muhat`, and `munu` unless `munu_offset` is given.
+`mu_e` and `muhat`, and, unless `munu_offset` is given, `Xn` and `Xp` with an
+ideal-gas region or else `munu`.
 """
 function cold_beta_slice(table::RawTable, eos::EOSTable; refine::Integer=8, munu_offset=nothing,
                          energy_offset=nothing)
@@ -157,15 +160,10 @@ function cold_beta_slice(table::RawTable, eos::EOSTable; refine::Integer=8, munu
     d = [Float64(mue[i, 1, k]) - Float64(muh[i, 1, k]) for i in eachindex(logρ), k in eachindex(Yₑ)]
     all(isfinite, d) || throw(ArgumentError("cold_beta_slice: non-finite mu_e or muhat on the coldest row"))
 
-    # The criterion's offset, from the table's own munu where it has one.
+    # The criterion's offset, from muhat's own convention, not from munu.
+    c_μ = muhat_offset(table, "cold_beta_slice"; munu_offset)
     has_munu = has_field(table, "munu")
     munu = has_munu ? Float64.(field(table, "munu")[:, 1, :]) : zeros(0, 0)
-    c_μ = if munu_offset === nothing
-        has_munu || throw(ArgumentError("cold_beta_slice: table has no 'munu'; pass munu_offset"))
-        median_of(vec(munu .- d))
-    else
-        Float64(munu_offset)
-    end
     mismatch = has_munu ? count(>(1.0e-3), abs.(munu .- (d .+ c_μ))) / length(d) : NaN
     c_E = if energy_offset === nothing
         δ, spread, n = electron_offset(table, d, eos.m_B_table_g)

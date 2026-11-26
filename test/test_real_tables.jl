@@ -61,18 +61,18 @@ end
 function _test_beta_equilibrium(name, t, eos)
     v = EOSTableView(eos)
     lκ = log10(v.κ)
-    Q, mₑ = 1.29333, EntropyEOS.M_ELECTRON_MEV
+    mₑ = EntropyEOS.M_ELECTRON_MEV
     oconnor_ott = name == "LS220"
     if oconnor_ott
-        # Its energy and chemical potentials do not fit one convention at high
-        # density, so the electron-mass check refuses it; given explicitly:
+        # Its ε is too noisy above 10^13.5 g/cm³ for the electron-mass check,
+        # which refuses it; given explicitly, with the default's value:
         @test_throws ArgumentError cold_beta_slice(t, eos)
-        sl = cold_beta_slice(t, eos; energy_offset=-Q + mₑ)
-        @test sl.munu_offset ≈ -Q atol = 1e-4
-        @test 0.3 < sl.munu_mismatch < 0.45    # its munu drops the −Q below ~10⁸ g/cm³
+        sl = cold_beta_slice(t, eos; energy_offset=mₑ)
+        @test sl.munu_offset == 0
+        @test 0.55 < sl.munu_mismatch < 0.7    # its munu subtracts a further Q above ~10⁸ g/cm³
     else
         sl = cold_beta_slice(t, eos)
-        @test sl.munu_offset ≈ 0 atol = 1e-6
+        @test sl.munu_offset == 0
         @test sl.munu_mismatch == 0
         @test sl.energy_offset ≈ mₑ
     end
@@ -128,14 +128,10 @@ function _test_composition(name, t, eos)
     @test matches(ct, eos)
     oconnor_ott = name == "LS220"
     @test ct.light_fields == (oconnor_ott ? String[] : name == "SRO LS220" ? ["Xl"] : ["Xd", "Xt", "X3he", "X4li"])
-    if oconnor_ott
-        @test abs(ct.munu_offset + Q) <= 1e-5      # −1.293333; its own Q
-    else
-        @test abs(ct.munu_offset) <= 1e-6
-    end
+    @test ct.munu_offset == 0                  # every table's muhat includes Q
 
     # Every node: the datasets, and μ_ν = the table's munu, except where
-    # O'Connor–Ott's munu lacks −Q (below 10⁸ g/cm³).
+    # O'Connor–Ott's munu subtracts a further Q (above 10⁸ g/cm³).
     nx, nu, ny = size(t)
     mue, muh, munu = field(t, "mu_e"), field(t, "muhat"), field(t, "munu")
     Xn, Xh, Abar = field(t, "Xn"), field(t, "Xh"), field(t, "Abar")
@@ -144,7 +140,7 @@ function _test_composition(name, t, eos)
     nbad = 0
     for k in 1:ny, j in 1:nu, i in 1:nx
         r = E.composition_index(cv, Float64(i - 1), Float64(j - 1), Float64(k - 1))
-        want = munu[i, j, k] + (oconnor_ott && t.logρ[i] < 8 ? ct.munu_offset : 0.0)
+        want = munu[i, j, k] + (oconnor_ott && t.logρ[i] > 8 ? Q : 0.0)
         δ = abs(r.μ_ν - want)
         # O'Connor–Ott LS220's munu is inconsistent with its mu_e − muhat at 88
         # nodes in the noisy band where its nuclei dissolve (CODE.md,
@@ -165,7 +161,7 @@ function _test_composition(name, t, eos)
 
     # μ_ν = 0 on the cold β-equilibrium: at T_min to round-off, and at the
     # temperature the slice's states evaluate to within that difference.
-    sl = oconnor_ott ? cold_beta_slice(t, eos; energy_offset=-Q + E.M_ELECTRON_MEV) : cold_beta_slice(t, eos)
+    sl = oconnor_ott ? cold_beta_slice(t, eos; energy_offset=E.M_ELECTRON_MEV) : cold_beta_slice(t, eos)
     Tmin = exp10(t.logT[1])
     worst_min = worst_pt = 0.0
     for (ρ★, y, s, cl) in zip(sl.ρ★, sl.yₑ, sl.s, sl.clamped)
