@@ -193,7 +193,8 @@ end
     @testset "munu_offset and the build's checks" begin
         Q = E.Q_NP_MEV
         mk() = make_synthetic_table(SyntheticOptions(; with_composition=true))
-        # A table whose munu subtracts Q, as O'Connor–Ott LS220's does: μ̂ then
+        # The synthetic composition is no ideal gas, so the convention comes
+        # from munu. A munu that subtracts Q says muhat lacks it: μ̂ then
         # carries Q, and μ_ν is the table's munu.
         t = mk()
         add_field!(t, "munu", field(t, "mu_e") .- field(t, "muhat") .- Q)
@@ -206,6 +207,22 @@ end
         add_field!(t, "munu", field(t, "mu_e") .- field(t, "muhat") .+ 0.5)
         @test_throws ArgumentError CompositionTable(t, E.build_eos(t))
         @test CompositionTable(t, E.build_eos(t); munu_offset=0.5).munu_offset == 0.5
+        # An ideal gas of free nucleons decides instead, and munu is not read:
+        # here muhat includes Q although munu subtracts a further one, as on
+        # O'Connor–Ott LS220 above 10⁸ g/cm³; then muhat lacks Q.
+        mₙ = E.M_NEUTRON_G * E.C_LIGHT_CM_S^2 / E.MEV_TO_ERG
+        for (shift, want) in ((0.0, 0.0), (-Q, -Q))
+            t = mk()
+            T = [exp10(t.logT[j]) for i in eachindex(t.logρ), j in eachindex(t.logT), k in eachindex(t.Yₑ)]
+            μh = Q .+ T .* log.(field(t, "Xn") ./ field(t, "Xp") .* ((mₙ - Q) / mₙ)^1.5) .+ shift
+            add_field!(t, "muhat", μh)
+            add_field!(t, "munu", field(t, "mu_e") .- μh .- Q)
+            c = CompositionTable(t, E.build_eos(t))
+            @test c.munu_offset == want
+            @test E.composition_index(c.view, 3.0, 4.0, 5.0).μ̂ === μh[4, 5, 6] - want
+            add_field!(t, "muhat", μh .+ 0.5)
+            @test_throws ArgumentError CompositionTable(t, E.build_eos(t))
+        end
         # munu is optional with the offset given.
         t = mk()
         tm = RawTable(t.logρ, t.logT, t.Yₑ)

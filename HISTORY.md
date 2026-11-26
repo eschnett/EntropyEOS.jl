@@ -378,6 +378,28 @@ errors in `munu` alone; looking further the same day showed `mu_e`, `muhat`,
 dissolve, and the note was rewritten to say so
 ([CODE.md](CODE.md#composition)).
 
+2026-11-25 (2.4.1). Fixed μ̂ and μ_ν on O'Connor–Ott LS220, which 2.4.0 had
+off by Q = 1.293 MeV: μ̂ = `muhat` + Q, so μ_ν = `mu_e − muhat − Q`. The
+convention had been read off the table's `munu`, which is −Q from
+`mu_e − muhat` above 10⁸ g/cm³ and 0 below, and the majority was taken to be
+right. Reviewing TreeGRRMHD's EOS-13 draft, which asks for the nucleons' own
+`mu_n` and `mu_p`, showed the opposite. In the hot, dilute region, where the
+free nucleons are an ideal gas, this table's `muhat` is
+Q + T ln[(X_n/X_p)(m_p/m_n)^{3/2}] to 10 keV on both sides of 10⁸ g/cm³, as on
+the other three tables; in uniform matter it is SRO LS220's to 0.05–0.2 MeV;
+and no mass convention makes its `munu` above 10⁸ right. So `munu` is wrong
+there, and every table's `muhat` includes Q. The energy check could not decide:
+the table's ε is too noisy where it applies.
+
+The offset is now read off the free nucleons (`muhat_offset`), for both
+`CompositionTable` and `cold_beta_slice`, with `munu` only as a fallback for
+tables without an ideal-gas region; it is 0 on all four tables. O'Connor–Ott
+LS220's cold β-equilibrium moved with it, Yₑ at 10¹² g/cm³ from 0.211 to 0.193
+(SRO LS220: 0.194), and its `munu_mismatch` from 0.385 to 0.615. The β-equilibrium
+entry above, of 2026-11-20, records the old reading, as does the first bullet of
+the 2.4.0 entry; its last paragraph's "μ_ν is the table's `munu` − Q" below
+10⁸ g/cm³ is, correctly, `munu` there and `munu + Q` above.
+
 ## Discipline in `core/`
 
 ### The one stack buffer

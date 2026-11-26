@@ -4,12 +4,12 @@
 # are resolved here, once, so that a kernel sees one convention for every
 # table:
 #
-#   * μ̂. O'Connor–Ott LS220's `muhat` lacks the neutron–proton mass difference
-#     Q, the Hempel and SRO tables' includes it. The offset that turns
-#     `mu_e − muhat` into the table's `munu` is measured on the coldest row, as
-#     `cold_beta_slice` does (0, or −Q on O'Connor–Ott LS220), and taken out of
-#     μ̂, so that μ̂ always includes Q and μ_ν = μ_e − μ̂. Measured on all four
-#     real tables (2026-11-25), the offset is the same at every temperature.
+#   * μ̂. Whether `muhat` includes the neutron–proton mass difference Q is read
+#     off the table's own free nucleons where they are a hot, dilute ideal gas
+#     (`muhat_offset`), not off its `munu`: O'Connor–Ott LS220's `munu`
+#     subtracts a further Q above 10⁸ g/cm³. All four real tables' `muhat`
+#     includes Q; a table's that lacks it gets Q added, so that μ̂ always
+#     includes Q and μ_ν = μ_e − μ̂.
 #   * The light clusters. The Hempel tables carry d, t, ³He and ⁴Li, SRO one
 #     `Xl`; without them the four classic species miss up to 30% of the mass at
 #     log ρ 11–13, T 3–10 MeV, Yₑ 0.1–0.3 on DD2. They are summed into X_l.
@@ -23,6 +23,81 @@ const LIGHT_CLUSTER_FIELDS = ("Xd", "Xt", "X3he", "X4li", "Xl")
 
 # How far the measured munu offset may be from 0 or −Q, in MeV.
 const MUNU_OFFSET_TOL_MEV = 0.01
+
+# The ideal-gas test of `muhat`: the nodes it reads, how many it needs, how
+# alike their residuals must be for the gas to count as ideal, and how far
+# their median may be from 0 or −Q, in MeV. On the real tables the residuals'
+# 5–95 % range is 0.005–0.03 MeV (O'Connor–Ott LS220) or narrower.
+const IDEAL_GAS_T_MEV = (2.0, 10.0)
+const IDEAL_GAS_LOGRHO_MAX = 10.0
+const IDEAL_GAS_X_MIN = 0.05
+const IDEAL_GAS_MIN_NODES = 100
+const IDEAL_GAS_IQR_MEV = 0.05
+const IDEAL_GAS_TOL_MEV = 0.1
+
+"""
+    muhat_offset(table::RawTable, who; munu_offset = nothing) -> Float64
+
+The constant `c` in `μ_ν = mu_e − muhat + c`, in MeV: 0 if the table's `muhat`
+includes the neutron–proton mass difference `Q`, `−Q` if it does not. `who`
+prefixes the error messages.
+
+Where the free nucleons are a hot, dilute ideal gas (`T` 2–10 MeV,
+`log10 ρ ≤ 10`, `Xn` and `Xp` above 0.05), a `muhat` that includes `Q` is
+`Q + T ln[(Xn/Xp)(m_p/m_n)^{3/2}]`. The median of `muhat` minus that, over those
+nodes, must be 0 or `−Q` to within 0.1 MeV, and is rounded to it; otherwise
+this throws. The test reads only the table's own composition, not `munu`, whose
+convention can differ from its `muhat`'s (O'Connor–Ott LS220's, above
+10⁸ g/cm³). A table without such nodes, or whose residuals spread by more than
+0.05 MeV (the synthetic tables, which are not physics), falls back to the
+median of `munu − (mu_e − muhat)` on the coldest row, which must then be 0 or
+`−Q` to within 10 keV.
+"""
+function muhat_offset(table::RawTable, who::AbstractString; munu_offset=nothing)
+    munu_offset === nothing || return Float64(munu_offset)
+    m = ideal_gas_muhat_residual(table)
+    if m !== nothing
+        abs(m) <= IDEAL_GAS_TOL_MEV && return 0.0
+        abs(m + Q_NP_MEV) <= IDEAL_GAS_TOL_MEV && return -Q_NP_MEV
+        throw(ArgumentError("$who: in the ideal-gas limit muhat differs from Q + T ln[(Xn/Xp)(m_p/m_n)^{3/2}] " *
+                            "by $m MeV, neither 0 nor −Q = $(-Q_NP_MEV) MeV; pass munu_offset (MeV) explicitly"))
+    end
+    has_field(table, "munu") ||
+        throw(ArgumentError("$who: the table has no ideal-gas region to read muhat's convention from, and no " *
+                            "'munu'; pass munu_offset (MeV)"))
+    mue, muh, munu = field(table, "mu_e"), field(table, "muhat"), field(table, "munu")
+    d = [Float64(munu[i, 1, k]) - (Float64(mue[i, 1, k]) - Float64(muh[i, 1, k])) for i in axes(munu, 1),
+         k in axes(munu, 3)]
+    all(isfinite, d) || throw(ArgumentError("$who: non-finite mu_e, muhat or munu on the coldest row"))
+    c = median_of(vec(d))
+    abs(c) <= MUNU_OFFSET_TOL_MEV || abs(c + Q_NP_MEV) <= MUNU_OFFSET_TOL_MEV ||
+        throw(ArgumentError("$who: munu − (mu_e − muhat) has median $c MeV on the coldest row, " *
+                            "neither 0 nor −Q = $(-Q_NP_MEV) MeV; pass munu_offset (MeV) explicitly"))
+    return c
+end
+
+# The median of `muhat − Q − T ln[(Xn/Xp)(m_p/m_n)^{3/2}]` over the ideal-gas
+# nodes, or `nothing` where the test does not apply.
+function ideal_gas_muhat_residual(table::RawTable)
+    all(f -> has_field(table, f), ("muhat", "Xn", "Xp")) || return nothing
+    muh, Xn, Xp = field(table, "muhat"), field(table, "Xn"), field(table, "Xp")
+    m_n = M_NEUTRON_G * C_LIGHT_CM_S^2 / MEV_TO_ERG
+    lr = 1.5 * log1p(-Q_NP_MEV / m_n)          # ln (m_p/m_n)^{3/2}
+    r = Float64[]
+    for k in axes(muh, 3), j in axes(muh, 2), i in axes(muh, 1)
+        T = exp10(Float64(table.logT[j]))
+        IDEAL_GAS_T_MEV[1] <= T <= IDEAL_GAS_T_MEV[2] && Float64(table.logρ[i]) <= IDEAL_GAS_LOGRHO_MAX || continue
+        xn, xp = Float64(Xn[i, j, k]), Float64(Xp[i, j, k])
+        xn > IDEAL_GAS_X_MIN && xp > IDEAL_GAS_X_MIN || continue
+        v = Float64(muh[i, j, k]) - Q_NP_MEV - T * (log(xn / xp) + lr)
+        isfinite(v) && push!(r, v)
+    end
+    length(r) >= IDEAL_GAS_MIN_NODES || return nothing
+    s = sort(r)
+    q(f) = s[clamp(round(Int, f * (length(s) - 1)) + 1, 1, length(s))]
+    q(0.75) - q(0.25) <= IDEAL_GAS_IQR_MEV || return nothing
+    return median_of(s)
+end
 
 """
     CompositionTable{T}
@@ -60,15 +135,17 @@ in a kernel next to `eos`, which must have been built from the same file
 that does not need the composition carries none of its arrays (nine fields per
 node, 180 MB in Float64 on DD2).
 
-Reads `mu_e`, `muhat`, `Xn`, `Xp`, `Xa`, `Xh`, `Abar`, `Zbar`, those of
-`Xd`, `Xt`, `X3he`, `X4li` and `Xl` the table has, and `munu` unless
-`munu_offset` is given. Every one must be finite.
+Reads `mu_e`, `muhat`, `Xn`, `Xp`, `Xa`, `Xh`, `Abar`, `Zbar`, and those of
+`Xd`, `Xt`, `X3he`, `X4li` and `Xl` the table has; every one must be finite.
 
-`munu_offset` is the median of `munu − (mu_e − muhat)` on the coldest row, as in
-[`cold_beta_slice`](@ref) but without its energy check. It must be 0 or
-`−Q` ([`q_np`](@ref)) to within 10 keV, or the build throws; pass it explicitly
-for a table with another convention. Stored μ̂ is `muhat − munu_offset`, so
-that it includes `Q` on every table.
+`munu_offset` is the constant `c` in `μ_ν = mu_e − muhat + c`: 0 if the table's
+`muhat` includes `Q` ([`q_np`](@ref)), `−Q` if it does not. By default it is
+read off the table's free nucleons in their ideal-gas limit, as
+[`cold_beta_slice`](@ref) does; a table without that limit falls back to its
+`munu`, read only then. Either must give 0 or `−Q`, or the build throws; pass
+it explicitly for a table with another convention. Stored μ̂ is
+`muhat − munu_offset`, so that it includes `Q` on every table. All four real
+tables' `muhat` already does.
 
 Mass fractions are clamped to `[0, 1]` at the nodes, and `Ā`, `Z̄` to `≥ 0`;
 where `Xh = 0` they are stored as 1 and 0.
@@ -91,22 +168,11 @@ function CompositionTable(raw::RawTable{T}, eos::EOSTable; munu_offset=nothing) 
     for f in need
         check_composition_field(raw, f)
     end
-    munu_offset === nothing && check_composition_field(raw, "munu")
     light = String[f for f in LIGHT_CLUSTER_FIELDS if has_field(raw, f)]
     foreach(f -> check_composition_field(raw, f), light)
 
+    c₀ = muhat_offset(raw, "CompositionTable"; munu_offset)
     mue, muh = field(raw, "mu_e"), field(raw, "muhat")
-    c₀ = if munu_offset === nothing
-        munu = field(raw, "munu")
-        d = [Float64(munu[i, 1, k]) - (Float64(mue[i, 1, k]) - Float64(muh[i, 1, k])) for i in 1:nx, k in 1:ny]
-        m = median_of(vec(d))
-        abs(m) <= MUNU_OFFSET_TOL_MEV || abs(m + Q_NP_MEV) <= MUNU_OFFSET_TOL_MEV ||
-            throw(ArgumentError("CompositionTable: munu − (mu_e − muhat) has median $m MeV on the coldest row, " *
-                                "neither 0 nor −Q = $(-Q_NP_MEV) MeV; pass munu_offset (MeV) explicitly"))
-        m
-    else
-        Float64(munu_offset)
-    end
 
     Xn, Xp, Xa, Xh = field(raw, "Xn"), field(raw, "Xp"), field(raw, "Xa"), field(raw, "Xh")
     Abar, Zbar = field(raw, "Abar"), field(raw, "Zbar")

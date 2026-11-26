@@ -615,29 +615,31 @@ counterpart.
   pressure there, and g fell along the branch.
 - **Criterion.** μ_ν = `mu_e − muhat` + c₀ = 0 on the coldest row, bilinear in
   log ρ and Yₑ. "Cold" is T_min: 0.01 MeV on the O'Connor–Ott LS220 and the
-  Hempel tables, 0.001 MeV on SRO LS220.
-- **Conventions.** Measured on the coldest row, 2026-11-20; the second column
-  with Richardson-extrapolated difference quotients:
+  Hempel tables, 0.001 MeV on SRO LS220. c₀ is 0 if `muhat` includes
+  Q = m_n − m_p and −Q if not, read off the table's free nucleons as for the
+  [composition](#composition); it is 0 on all four tables.
+- **Conventions.** Measured on the coldest row, 2026-11-20 (the first column
+  corrected 2026-11-25); the second column with Richardson-extrapolated
+  difference quotients:
 
   | table | `munu` − (`mu_e` − `muhat`) | (`mu_e` − `muhat`) − m_B ∂ε/∂Yₑ |
   | --- | --- | --- |
   | SRO LS220 | 0 everywhere | 0.510 (IQR 0.507–0.511 above 10¹²) |
   | DD2, SFHo | 0 everywhere | 0.510 above 10¹⁴; 0.28–0.50 below, IQR up to 0.8 |
-  | LS220 (O'Connor–Ott) | −Q = −1.293 above ~10⁸ g/cm³, 0 below | 0.30–0.38 below 10¹⁴; −0.6, IQR 3, above |
+  | LS220 (O'Connor–Ott) | 0 below ~10⁸ g/cm³, −Q = −1.293 above | 0.30–0.38 below 10¹⁴; −0.6, IQR 3, above |
 
-  So the tables' `mu_e` includes the electron's rest mass and their ε does not.
-  The Hempel tables' ε includes the neutron–proton mass difference; O'Connor–Ott
-  LS220's gives every nucleon one mass, and its `munu` subtracts Q, as its
-  documented formula says, but only above ~10⁸ g/cm³ — below, the field is
-  missing the −Q, by the same `mu_e − muhat` relation to ε on both sides. The
-  slice therefore builds μ_ν from `mu_e − muhat` with one constant c₀, the median
-  of `munu − (mu_e − muhat)` (0, or −Q for O'Connor–Ott), reports where `munu`
-  disagrees (`munu_mismatch`, 0.385 on O'Connor–Ott LS220), and corrects the
-  energy by c_E = c₀ + mₑc², so that ∂E/∂Yₑ = μ_ν. The correction moves the
+  So the tables' `mu_e` includes the electron's rest mass and their ε does not,
+  and ε includes the neutron–proton mass difference wherever it is smooth enough
+  to tell. Every table's `muhat` includes Q; O'Connor–Ott LS220's `munu`
+  subtracts a further Q above ~10⁸ g/cm³, where it is wrong by −Q. The slice
+  therefore builds μ_ν from `mu_e − muhat` with one constant c₀, reports where
+  `munu` disagrees (`munu_mismatch`, 0.615 on O'Connor–Ott LS220), and corrects
+  the energy by c_E = c₀ + mₑc², so that ∂E/∂Yₑ = μ_ν. The correction moves the
   relative g of two compositions by c_E·ΔYₑ, 28 keV per baryon between the Hempel
   tables' 0.506 and 0.451 branches. It is checked: above 10¹³·⁵ g/cm³ the second
-  column must be mₑc² to within 20 keV, which O'Connor–Ott LS220 fails, so that
-  table needs `energy_offset` given explicitly. The test also needs the right
+  column must be mₑc² to within 20 keV, which O'Connor–Ott LS220's noisy ε fails,
+  so that table needs `energy_offset` given explicitly; the tests give it mₑc²,
+  the default's value. The test also needs the right
   baryon mass: the wrong one is off by 0.8 % of μ, ~1 MeV near nuclear density.
 - **Why not `EOSPoint.μ̃`.** μ̃ is (∂U/∂Yₑ)_s, the same combination in principle,
   but on the cold edge its term ε_T·σ_y/σ_T divides by a small σ_T and magnifies
@@ -654,10 +656,12 @@ counterpart.
   uses, interpolates the raw ε through the nodes and has no such error.
 - **Results.** Yₑ at log ρ = 8, 10, 12, 13, 14, 14.5, 15 (raw g/cm³): SFHo 0.453,
   0.401, 0.167, 0.034, 0.021, 0.055, 0.067; DD2 0.453, 0.401, 0.169, 0.039, 0.028,
-  0.060, 0.094; LS220 0.438, 0.396, 0.211, 0.038, 0.035 (clamped), 0.050, 0.146.
-  O'Connor–Ott LS220 starts at Yₑ = 0.035 and its root lies below that at
-  log ρ ≈ 13.0–14.3; SRO LS220 clamps near log ρ = 13.65; the Hempel tables
-  never. A clamped state sets `FLAG_CLAMP_YE`.
+  0.060, 0.094; SRO LS220 0.449, 0.396, 0.194, 0.035, 0.013, 0.050, 0.146;
+  O'Connor–Ott LS220 0.429, 0.387, 0.193, 0.035 and 0.035 (clamped), 0.049,
+  0.145. O'Connor–Ott LS220 starts at Yₑ = 0.035 and its root lies below that at
+  log ρ ≈ 13.0–14.4; SRO LS220 clamps near log ρ = 13.65; the Hempel tables
+  never. The two LS220 tabulations differ below ~10¹¹ g/cm³ because their
+  nuclei do (Ā by up to 40, `muhat` by up to ±2 MeV, either sign), not by Q. A clamped state sets `FLAG_CLAMP_YE`.
 - **g, not h, for hydrostatics.** Along the slice dg = dp/ρ★, and g is
   non-decreasing. The EOS's h is not: below ~10⁴ g/cm³ the T·ds term makes it
   fall, by at most 2·10⁻⁷ (224 edges on DD2 and SFHo). At one SRO jump a branch
@@ -681,23 +685,35 @@ are the EOS's knowledge, and ρ★ is the view's coordinate, not the table's.
   - μ_e includes mₑc², as every table's `mu_e` does.
   - μ̂ = `muhat − munu_offset`, so that it always includes Q = m_n − m_p and
     μ_ν = μ_e − μ̂ exactly; μ_ν is not interpolated from `munu`. The offset is
-    the median of `munu − (mu_e − muhat)` on the coldest row, as in
-    `cold_beta_slice`, without its energy check, and must be 0 or −Q to within
-    10 keV unless given. `q_np(cv)` is CODATA's Q, 1.29333236 MeV, so that rate
-    code does not hard-code another: the nucleons' own degeneracy, without rest
-    masses, is (μ̂ − Q)/T (RJS96's Pauli blocking), while η_ν = μ_ν/T needs no
-    Q.
-  - Measured at every node of the four tables (2026-11-25), the offset does not
-    depend on temperature, and `muhat = mu_n − mu_p` to round-off:
+    0 if `muhat` includes Q and −Q if not, and is read off the table's own free
+    nucleons where they are a hot, dilute ideal gas (T 2–10 MeV,
+    log ρ ≤ 10, X_n and X_p above 0.05). There a `muhat` that includes Q is
+    Q + T ln[(X_n/X_p)(m_p/m_n)^{3/2}], independent of the baryon mass that
+    defines ρ; the median residual must be within 0.1 MeV of 0 or −Q and is
+    rounded to it. A table without that region, or whose residuals spread by
+    more than 0.05 MeV (the synthetic ones), falls back to the median of
+    `munu − (mu_e − muhat)` on the coldest row, which must be 0 or −Q to within
+    10 keV. `cold_beta_slice` shares the test. `q_np(cv)` is CODATA's Q,
+    1.29333236 MeV, so that rate code does not hard-code another: the
+    nucleons' own degeneracy, without rest masses, is (μ̂ − Q)/T (RJS96's Pauli
+    blocking), while η_ν = μ_ν/T needs no Q.
+  - Measured on the four tables (2026-11-25), every one's `muhat` includes Q:
 
-    | table | `munu − (mu_e − muhat)` | max \|μ_ν − `munu`\| at the nodes |
-    | --- | --- | --- |
-    | DD2, SFHo, SRO LS220 | 0, every T | 9·10⁻¹³ MeV |
-    | LS220 (O'Connor–Ott) | −1.293333 (−Q to 0.6 eV) above 10⁸ g/cm³, 0 below | 8·10⁻¹¹ MeV, except 88 nodes |
+    | table | ideal-gas residual (median) | `munu − (mu_e − muhat)` | max \|μ_ν − `munu`\| at the nodes |
+    | --- | --- | --- | --- |
+    | SRO LS220 | 0.00007 MeV | 0, every T | 9·10⁻¹³ MeV |
+    | DD2, SFHo | 0.0007 MeV | 0, every T | 9·10⁻¹³ MeV |
+    | LS220 (O'Connor–Ott) | 0.010 MeV, no step at 10⁸ g/cm³ | 0 below 10⁸ g/cm³; −1.293333 above | 6·10⁻⁷ MeV after adding Q above 10⁸, except 88 nodes |
 
-    Below 10⁸ g/cm³ O'Connor–Ott LS220's `munu` lacks the −Q, as for the
-    slice; μ_ν follows `mu_e − muhat` there too. The 88 nodes are the next
-    bullet's.
+    `muhat = mu_n − mu_p` to round-off, and to 10 keV on O'Connor–Ott LS220.
+    That table's `munu` is the field that is off: above 10⁸ g/cm³ it subtracts
+    Q from `mu_e − muhat`, although its `muhat` already includes it. Three
+    findings agree. The ideal-gas residual has no step at 10⁸. Where both have
+    uniform matter (log ρ 14.2–14.8, T 1–10 MeV), its `muhat` is SRO LS220's,
+    the same model tabulated again, to 0.05–0.2 MeV at equal ρ. And with
+    `muhat` including Q, `munu` there is off by −Q with physical nucleon masses
+    and by −2Q with one mass for both, so no convention makes it right. The 88
+    nodes are the next bullet's.
 - **O'Connor–Ott LS220 is noisy where its nuclei dissolve.** At log ρ
   12.8–14.3, at Yₑ from 0.035 to 0.55, single nodes sit off both their neighbours
   along ρ, in the chemical potentials and the composition at once. At
