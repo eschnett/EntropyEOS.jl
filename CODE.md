@@ -118,7 +118,28 @@ bug this note exists to prevent**.
 Two format traps: `energy_shift`, `have_rel_cs2` and `points*` are one-element
 *datasets*, not HDF5 attributes; and the baryon-mass convention is per table
 family and is **not in the file** (amu for LS220, DD2, SFHo; the neutron mass
-for the SRO tabulation).
+for the SRO tabulation). The caller supplies it as `BuildOptions.m_B_table_g`,
+whose default is the amu, so an SRO table built with the default is wrong by
+0.87 % in n_B and in every per-baryon conversion.
+
+The tables themselves confirm these conventions. At fixed ρ and Yₑ the first law
+reads dε = T ds / m_B, with ε per gram and s per baryon, so m_B = ∫T ds / Δε
+along a temperature row. Over log₁₀ρ 4–8 and T 2–60 MeV, with trapezoid steps
+of 1, 2 and 4 grid cells extrapolated (Richardson) to zero step, the median is
+(2026-11-26):
+
+| table | m_B / m_u |
+| --- | --- |
+| O'Connor–Ott LS220 | 0.99999 |
+| SRO LS220 | 1.00866 (= m_n/m_u) |
+| DD2, SFHo | 1.00000 |
+
+A single-cell step alone reads about 0.1 % low on every table, so the
+extrapolation is needed to separate m_u from m_n.
+
+n_B = ρ★/`m_B_star_g` = ρ/`m_B_table_g`: ρ★ counts baryons in m_B★ = κ·m_B_table,
+and mixing the pairs is off by κ (0.990 on both LS220 tables, 0.9986 on DD2
+and SFHo).
 
 Table-side units are cgs plus MeV plus k_B per baryon. The run-time path's
 units, and why κ is part of the EOS identity, are in
