@@ -19,6 +19,7 @@ recorded each item in the documentation.
   - [Static analysis](#static-analysis)
 - [Precision and devices](#precision-and-devices)
   - [Not-quite-transcendental functions](#not-quite-transcendental-functions)
+  - [Re-indexing by entropy](#re-indexing-by-entropy)
 
 ## Scope
 
@@ -1054,3 +1055,48 @@ Also not pursued: if those 3% ever matter, all four functions follow exactly
 from one e = expm1(w), as sinh w = e(e + 2)/(2(e + 1)),
 cosh w − 1 = e²/(2(e + 1)) and tanh w = sinh w / cosh w. That would be a
 deviation from the C++, and `prim2con` would have to follow it.
+
+### Re-indexing by entropy
+
+2026-11-27. Rejected re-indexing the table from (log ρ*, log T, Yₑ) to
+(log ρ*, η, Yₑ), with η an entropy coordinate, which would replace the
+temperature solve in every `evaluate` by one spline sample. Measured by
+`study/reindex.jl` on the synthetic table and the five real tables.
+
+The candidate stores one field F(x, η, y) = L, the fitted log₁₀(ε̂ + shift),
+with φ(s) = asinh(s/s₀), which is ln-like but total on SRO LS220's s < 0, and
+η = (φ(s) − a)/(b − a), where a(x, y) and b(x, y) are φ of the entropy at the
+coldest and hottest tabulated temperature, fitted as 2-D splines. F is sampled
+from today's `evaluate` at nη points per column and fitted like today's fields;
+its derivatives were taken by ForwardDiff, exactly for the representation.
+Against today's cold `evaluate` at 20,000 points uniform in (x, u, y) inside the
+physical box, on DD2, relative errors at p50 / p99, cs² absolute:
+
+| s₀ | nη | U | p | U_s (temperature) | cs² |
+| --- | --- | --- | --- | --- | --- |
+| 1 | nu | 1.5e-6 / 9.8e-4 | 9.3e-5 / 0.11 | 1.0e-4 / 0.65 | 4.4e-5 / 7.3e-3 |
+| 1 | 2 nu | 8.4e-7 / 7.7e-4 | 5.8e-5 / 0.054 | 3.9e-5 / 0.43 | 3.3e-5 / 4.4e-3 |
+| 0.01 | nu | 1.7e-6 / 1.8e-2 | 1.2e-4 / 0.34 | 1.0e-4 / 0.22 | 8.8e-5 / 5.8e-2 |
+| 0.01 | 2 nu | 1.1e-6 / 1.8e-2 | 7.7e-5 / 0.29 | 4.3e-5 / 0.19 | 7.6e-5 / 5.9e-2 |
+
+DD2 repaired, SFHo, LS220 and SRO LS220 behave alike. The medians are small,
+but the tails do not shrink with nη, so they are not an η-resolution error.
+Where today's point is physical (U_s > 0, 0 < cs² < 1; about 19,800 of the
+20,000), the candidate has cs² outside (0, 1) at 50–270 points and U_s ≤ 0 at
+up to 41, and on SRO LS220 with s₀ = 1 at up to 376. With s₀ = 1 the errors sit
+in the cold, dense corner, where asinh is linear and the cold entropies share a
+few η cells; with s₀ = 0.01 they sit along the band where the composition
+changes, which a line of constant η crosses at an angle while the table's data
+lie on (x, u) nodes.
+
+For scale, both representations were fitted to each table with every other
+point dropped on each axis and compared against the full table. Today's U_s
+error is then 0.22–0.32 at p99, the candidate's 0.3–1.5, and the candidate's p
+error 1.2–3 times today's (2.5–14 times on SRO LS220); its U error matches
+today's only with s₀ = 1. So at full resolution re-indexing adds about the
+error of halving today's resolution. One field at nη = nu is half today's
+memory, but the tabulated temperature `T_MeV` would need a second, which
+restores parity.
+
+What survived is the seed table, a temperature predictor for today's solve
+([CODE.md](CODE.md#open-items)).
