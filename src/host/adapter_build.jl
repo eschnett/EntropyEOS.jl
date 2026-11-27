@@ -423,5 +423,34 @@ function build_box(t::RawTable{T}, opts::BuildOptions, fp::UInt64) where {T}
     view = EOSTableView(σ_final, L_final, κ, shift_hat, conv_t, inv_c², x_lo, x_hi, u_lo, u_hi, y_lo, y_hi,
                         x_ext_lo, x_ext_hi, u_ext_lo, u_ext_hi, T(opts.ext_slope_floor_σ),
                         T(opts.ext_slope_floor_L), T(opts.cs²_ext_cap), Int32(50), fp)
+    # Again with the bound on its entropy window's width, which needs the view.
+    view = EOSTableView(σ_final, L_final, κ, shift_hat, conv_t, inv_c², x_lo, x_hi, u_lo, u_hi, y_lo, y_hi,
+                        x_ext_lo, x_ext_hi, u_ext_lo, u_ext_hi, T(opts.ext_slope_floor_σ),
+                        T(opts.ext_slope_floor_L), T(opts.cs²_ext_cap), Int32(50), fp, window_width_bound(view))
     return EOSTable{T}(view, m_B_star_g, opts.m_B_table_g, audit)
+end
+
+"""
+    window_width_bound(v) -> T
+
+Half the least width of the extended entropy window, `srange_extended`'s
+`s_max - s_min`, sampled at three points per grid cell in log ρ* across the
+extended box and in Yₑ; zero if any sample is not finite and positive. The
+least width lies at the top of the extended box on every table (1.09 on DD2,
+1.68 on SFHo and LS220, 3.35 on SRO LS220), where `locate` freezes the density,
+and twelve points per cell move it by under 0.1%, so the halving is a wide
+margin. con2prim's Newton clamps its step in s to a quarter of the window, and
+a step within a quarter of this bound needs no window.
+"""
+function window_width_bound(v::EOSTableView{T}) where {T}
+    _, _, ny = size(v.σ.c) .- 2
+    nx_ext = round(Int, (v.x_ext_hi - v.x_ext_lo) / v.σ.hx)
+    m = T(Inf)
+    for x in range(v.x_ext_lo, v.x_ext_hi; length=3nx_ext + 1), y in range(v.y_lo, v.y_hi; length=3(ny - 1) + 1)
+        r = srange_extended(v, exp10(T(x)), T(y))
+        width = r.s_max - r.s_min
+        width > zero(T) || return zero(T)        # NaN too
+        m = min(m, width)
+    end
+    return isfinite(m) ? m / 2 : zero(T)
 end

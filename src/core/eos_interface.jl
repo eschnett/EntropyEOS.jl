@@ -2,7 +2,7 @@
 # equation of state, and the two result types every EOS hands back.
 #
 # The solvers were written against the table, but they only ever touch it
-# through `evaluate`, `srange`, `srange_extended` and the box bounds, plus two
+# through `evaluate`, `srange`, `srange_extended` and the box bounds, plus three
 # optional methods whose defaults are built from those. Naming that surface lets
 # an analytic EOS use the same solver and the same never-fails policy.
 
@@ -28,9 +28,12 @@ provide, allocation-free and without ever throwing:
   * `yₑ_bounds(eos) -> (y_lo, y_hi)`: the physical box in `Yₑ`.
   * `EntropyEOS.κ(eos)`: the baryon-mass rescaling, `ρ★ = κρ`.
 
-Two further methods are optional, with defaults built on the ones above; an EOS
-overrides them only when it can do the same work more cheaply:
+Three further methods are optional, with defaults built on the ones above; an
+EOS overrides them only when it can do the same work more cheaply:
 
+  * [`EntropyEOS.s_width_bound`](@ref): a lower bound on the width of
+    `srange_extended` anywhere, so that con2prim's Newton can skip the window
+    on a small step.
   * [`EntropyEOS.evaluate_windowed`](@ref): `evaluate` and `srange_extended`
     at the same point.
   * [`EntropyEOS.entropy_from_energy`](@ref): the entropy at which `U` takes a
@@ -135,13 +138,25 @@ evaluate(eos::AbstractEOS{S}, ρ★, s, yₑ, u_guess) where {S} =
 # ---------------------------------------------------------------------------
 
 """
+    s_width_bound(eos) -> Real
+
+A lower bound on `s_max - s_min` of [`srange_extended`](@ref) at every density
+and `Yₑ`; zero, the default, when none is known. con2prim's Newton clamps its
+step in `s` to a quarter of the extended window at the current density, and a
+step no longer than a quarter of this bound is inside that clamp whatever the
+window, so the Newton samples the window only for a longer step. A bound that
+is not one would change the Newton's steps.
+"""
+@inline s_width_bound(::AbstractEOS{S}) where {S} = zero(S)
+
+"""
     evaluate_windowed(eos, ρ★, s, yₑ, u_guess) -> (EOSPoint, SRange)
 
 `evaluate(eos, ρ★, s, yₑ, u_guess)` and `srange_extended(eos, ρ★, yₑ)`
-together. The con2prim Newton clamps every step to the extended window at the
-current density, and the table's `evaluate` has already sampled that window to
-bracket its temperature solve, so the table returns it rather than sampling it
-twice.
+together. The table's temperature solve samples that window to bracket itself
+from a cold start, and the table returns it rather than sampling it twice.
+con2prim no longer calls it: its Newton needs the window only for a long step,
+and then samples it by `srange_extended` ([`s_width_bound`](@ref)).
 """
 @inline evaluate_windowed(eos::AbstractEOS{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where {S,T} =
     evaluate(eos, ρ★, s, yₑ, u_guess), srange_extended(eos, ρ★, yₑ)

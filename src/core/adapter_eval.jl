@@ -160,9 +160,15 @@ struct EOSTableView{T<:AbstractFloat,A<:AbstractArray{T,3}} <: AbstractEOS{T}
     # Identity of the raw table the view was built from, for pairing it with a
     # `CompositionView`; 0 when unknown. `narrow` and `adapt` carry it unchanged.
     fingerprint::UInt64
+
+    # A lower bound on the extended entropy window's width over the whole box,
+    # so that con2prim's Newton knows its step clamp is inactive without
+    # sampling the window; 0 when unknown, which always samples it.
+    s_width_min::T
 end
 
 logρ_bounds(v::EOSTableView) = (v.x_lo, v.x_hi)
+s_width_bound(v::EOSTableView) = v.s_width_min
 yₑ_bounds(v::EOSTableView) = (v.y_lo, v.y_hi)
 κ(v::EOSTableView) = v.κ
 

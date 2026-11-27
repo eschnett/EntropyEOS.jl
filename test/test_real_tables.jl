@@ -243,6 +243,15 @@ else
                     end
                 end
 
+                @testset "a short Newton step needs no entropy window" begin
+                    for (T, seed) in ((Float64, 51), (Float32, 52))
+                        m = width_bound_mismatches(T === Float64 ? v : E.narrow(v, Float32), StableRNG(seed), 100, T)
+                        @test m.bound > 0
+                        @test m.below == 0
+                        @test m.solves == 0
+                    end
+                end
+
                 @testset "lazy bracket ends" begin
                     for (T, seed) in ((Float64, 31), (Float32, 32))
                         m = lazy_ends_mismatches(T === Float64 ? v : E.narrow(v, Float32), StableRNG(seed), 200, T)

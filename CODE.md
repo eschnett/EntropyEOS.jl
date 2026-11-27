@@ -174,12 +174,14 @@ types keep `AbstractFloat`, since that is an array element type.
 **The EOS interface.** `prim2con`, `con2prim` and the state policy take any
 `AbstractEOS`. They reach it only through `evaluate`, `srange`,
 `srange_extended`, `logρ_bounds` and `yₑ_bounds`, and every method is typed on
-the abstract type. Two more methods are optional, because their defaults are
-built from those: `evaluate_windowed`, which the table overrides to return the
-extended window its temperature solve samples anyway (its `evaluate` from a
-warm start does not, [Deliberate deviations](#deliberate-deviations-from-the-c)), and
-`entropy_from_energy`, which it overrides to invert its energy field directly
-([Deliberate deviations](#deliberate-deviations-from-the-c)). The contract is
+the abstract type. Three more methods are optional, because their defaults are
+built from those: `s_width_bound`, a lower bound on the extended window's width
+that lets con2prim's Newton skip the window on a short step (0 by default, and
+the table's from its build); `evaluate_windowed`, which the table overrides to
+return the extended window its cold temperature solve samples anyway, and which
+con2prim no longer calls; and `entropy_from_energy`, which it overrides to
+invert its energy field directly (all three in
+[Deliberate deviations](#deliberate-deviations-from-the-c)). The contract is
 stated once, in `core/eos_interface.jl`. Introducing it changed no arithmetic
 ([HISTORY](HISTORY.md#the-eos-interface)).
 `EntropyEOS.κ` is part of the interface but is not exported, since `κ` is too common a name to take from a caller.
@@ -1019,7 +1021,8 @@ never a hard clamp, is about an EOS evaluated at a clamped point, whose zero
 derivatives stall Newton. It does not cover a search that evaluates the EOS
 only inside the box ([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)).
 
-Two changes are for speed. The first changes no output bit: **a warm
+Three changes are for speed. The first two change no output bit but an
+iteration count. The first: **a warm
 `evaluate` samples its temperature bracket's ends only when its solve needs
 them.** The C++ samples both ends of the extended bracket before every
 temperature solve: two of a warm evaluation's five or so B-spline samples.
@@ -1035,14 +1038,38 @@ itself, all fields but `iters` the same; `iters` counts the iterations taken
 instead of 0. Only an entropy within the solve's residual tolerance of an end's
 value could converge on a u beside that end instead. A warm start within 10⁻³ in
 log T samples no end on any table, and one as far as 0.1 samples one end in
-every eight. `evaluate_windowed`, which con2prim's residual calls, and a cold
-start still sample both ends first. Warm evaluations on DD2 (M3 Pro, one
-thread) went from 430–440 to 290–300 ns at the root and from 650–730 to
-500–600 ns at 10⁻³ to 0.03 in log T, at Float64 and Float32 alike. This is the
-TreeGRRMHD request EOS-14, for face states and ghost-zone pressures
-([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)).
+every eight. `evaluate_windowed` and a cold start still sample both ends first.
+Warm evaluations on DD2 (M3 Pro, one thread) went from 430–440 to 290–300 ns at
+the root and from 650–730 to 500–600 ns at 10⁻³ to 0.03 in log T, at Float64
+and Float32 alike. This is the TreeGRRMHD request EOS-14, for face states and
+ghost-zone pressures ([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)).
 
-The second: each pass of the cold seed recovers the
+The second: **con2prim's Newton samples the entropy window only for a long
+step.** It clamps its step in s to a quarter of the extended window at the
+current density, and every residual used to sample that window along with its
+evaluation. The clamp is the window's only use. A table now stores a lower
+bound on the window's width over its whole extended box (`s_width_bound`): half
+the least width sampled at three points per grid cell in log ρ* and in Yₑ. The
+least width lies at the top of the extended box on every table, where `locate`
+freezes the density: 1.09 on DD2, 1.68 on SFHo and LS220, 3.35 on SRO LS220 and
+16.8 on the synthetic table. Twelve points per cell move it by under 0.1%, so
+the halving is a wide margin, and a test checks the bound against the window
+at random points. A step no longer than a quarter of the bound is inside the
+clamp whatever the window, so the Newton takes it without the window; a longer
+one samples it by `srange_extended`, which gives the window the evaluation
+gave, bit for bit. The residual then calls `evaluate`, whose warm start samples
+no end (the first change), instead of `evaluate_windowed`. Compared with 2.4.2
+over 54,000 recoveries (`con2prim` cold and warm, `con2prim_safe` cold and
+warm, on DD2 at Float64 and Float32, SFHo and the synthetic table, a third of
+them with τ lowered tenfold to a thousandfold), every output bit agrees except
+the returned `EOSPoint`'s `iters` where its entropy lies beyond the extended
+window: the best iterate of a solve that failed because its state is colder than
+the table. Warm recoveries on DD2 (M3 Pro, one thread) cost 15% (Float64) and
+22% (Float32) less at the root, 9% and 13% less at 10⁻³ from it, and
+`con2prim_safe` 8–10% less; cold ones are unchanged within the noise. This
+reaches TreeGRRMHD's recovery rows, which EOS-14 did not.
+
+The third: each pass of the cold seed recovers the
 entropy from an internal energy. The C++ does that by a safeguarded Newton in
 s, each step a full `evaluate` and so a temperature solve of its own, which
 made the seed 80% of a cold solve. The table here solves its energy field for
