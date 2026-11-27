@@ -112,6 +112,18 @@ else
             @inbounds outf[i] = o.policy_flags
         end
 
+        # The atmosphere decided without level 1.
+        @eval @kernel function _gpu_policy!(outd, outρ, outs, outf, @Const(D), @Const(τ), @Const(DY), @Const(Sp),
+                                            @Const(Sq), @Const(B2), v, proj, pol)
+            i = @index(Global)
+            cin = Con2PrimIn(D[i], τ[i], DY[i], Sp[i], Sq[i], B2[i])
+            o = EntropyEOS.policy_atmosphere(v, cin, proj, pol)
+            @inbounds outd[i] = EntropyEOS.policy_decides(v, cin, proj, pol)
+            @inbounds outρ[i] = o.base.ρ
+            @inbounds outs[i] = o.base.s
+            @inbounds outf[i] = o.policy_flags
+        end
+
         @eval @kernel function _gpu_comp!(out, @Const(ρs), @Const(Ts), cv, yₑ)
             i = @index(Global)
             r = EntropyEOS.composition(cv, ρs[i], Ts[i], yₑ)
@@ -292,6 +304,43 @@ else
                     @info "GPU con2prim, two kernels: max relative difference from host" pending = length(idx) rel
                     @test rel < sqrt(eps(T)) * 100
                 end
+            end
+
+            @testset "policy_decides and policy_atmosphere" begin
+                # Densities across both bounds of the decision, the lower one
+                # exactly, colder and hotter, and Yₑ partly beyond the table.
+                proj = default_projection(v, exp10(T(v.x_lo) + one(T)))
+                pol = PolicyOptions{T}(; atm_trigger=10)
+                ρ_min = EntropyEOS.proj_ρ_min(v, proj)
+                lo = ρ_min * (one(T) - EntropyEOS.face_slack(T))
+                D = T[]; τ = T[]; DY = T[]; Sp = T[]; Sq = T[]; B2 = T[]
+                for (k, ρ) in enumerate(ρs)
+                    c = prim2con(v, ρ, mid(ρ), yₑ, T(0.5), T(0.01) * ρ, zero(T), T(NaN))
+                    Dk = k % 4 == 0 ? lo : ρ_min * T(exp10(-0.5 + 2 * (k - 1) / n))
+                    f = Dk / c.D
+                    ye_k = k % 7 == 0 ? T(v.y_hi + 0.1) : yₑ
+                    push!(D, Dk); push!(τ, c.τ * f * T((1, 1e-3, 1e3)[mod1(k, 3)])); push!(DY, ye_k * Dk)
+                    push!(Sp, c.S_par * f); push!(Sq, c.S_perp * f); push!(B2, c.B² * f)
+                end
+
+                dc = zeros(Bool, n); ρc = zeros(T, n); sc = zeros(T, n); fc = zeros(UInt32, n)
+                _gpu_policy!(CPU(), 64)(dc, ρc, sc, fc, D, τ, DY, Sp, Sq, B2, v, proj, pol; ndrange=n)
+                KernelAbstractions.synchronize(CPU())
+
+                dd = DEVARRAY(zeros(Bool, n)); dρ = DEVARRAY(zeros(T, n)); ds = DEVARRAY(zeros(T, n))
+                df = DEVARRAY(zeros(UInt32, n))
+                _gpu_policy!(BACKEND, 64)(dd, dρ, ds, df, DEVARRAY(D), DEVARRAY(τ), DEVARRAY(DY), DEVARRAY(Sp),
+                                          DEVARRAY(Sq), DEVARRAY(B2), dv, proj, pol; ndrange=n)
+                KernelAbstractions.synchronize(BACKEND)
+                dg, ρg, sg, fg = Array(dd), Array(dρ), Array(ds), Array(df)
+
+                # The decision is comparisons of the same values on either device.
+                @test dg == dc
+                @test count(dc) > n ÷ 4 && count(!, dc) > n ÷ 4
+                @test all(ρg[dc] .== ρ_min)
+                @test fg[dc] == fc[dc]
+                @test any(fc[dc] .& FLAG_POL_YE_CEILED .!= 0)
+                @test maximum(abs.(sg[dc] .- sc[dc]) ./ abs.(sc[dc])) < sqrt(eps(T)) * 100
             end
 
             @testset "con2prim_safe and apply_policy" begin

@@ -578,6 +578,27 @@ replaces:
 An application with its own rules (TreeGRRMHD puts any state with added rest
 mass at rest) replaces this function rather than configuring it.
 
+**The atmosphere without level 1.** For an input with
+`ρ_min·(1 − face_slack) ≤ D < atm_trigger·ρ_min`, level 1 solves and level 2
+then writes the atmosphere whatever level 1 returned. On a table such inputs are
+most of a run's atmosphere and among its dearest recoveries: they lie on or
+below the coldest row, and level 1 spends its Newton budget and the bracket
+scan on an answer that is discarded (TreeGRRMHD measured 32–41 µs on DD2,
+against about 1 µs for the atmosphere's own evaluation). `policy_decides(eos,
+in, proj, pol)` says whether an input is one of them, comparing exactly as the
+two levels compare, including level 1's density ceiling, above which it
+decides by `D` alone. `policy_atmosphere(eos, in, proj, pol)` then gives
+`apply_policy`'s output without the solve: the same state, conservatives and
+`EOSPoint`, bit for bit, since `apply_policy` reads nothing else of level 1's
+output for such an input. Only the record differs. Its flags are `ATMOSPHERE`
+and the Yₑ face bits, which need no solve, but not the face bits that do
+(`S_FLOORED`, sometimes `ρ_FLOORED`), so here `ATMOSPHERE` alone also means
+"below the trigger". Its `base.result` is `converged_newton` with no iterations
+and `solved` is false, as for level 1's other outputs without a solve. Both call
+only methods of the required interface, so an EOS wrapper that forwards those
+needs nothing more, and both run in a kernel (TreeGRRMHD's request EOS-15,
+[HISTORY](HISTORY.md#state-policy)).
+
 ### Flags
 
 The policy bits are 8–17, contiguous, and `FLAG_POL_ANY` masks them; bits 6–7

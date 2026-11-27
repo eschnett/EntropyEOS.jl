@@ -729,16 +729,86 @@ function apply_policy(eos::AbstractEOS{S}, in::Con2PrimIn{T}, out::Con2PrimSafeO
           (pol.collapse_to_atmosphere && (f & FLAG_POL_ρ_CEILED) != 0)
     atm || return out
 
+    b = out.base
+    return atmosphere_out(eos, in, b.ye, proj, pol, f | FLAG_POL_ATMOSPHERE, b.result, b.iters_newton,
+                          b.iters_fallback, out.solved)
+end
+
+"""
+    atmosphere_out(eos, in, ye_fallback, proj, pol, flags, res, it_n, it_f, solved)
+
+The atmosphere [`apply_policy`](@ref) writes for `in`: at rest, at ρ_min, with
+`pol.s_atm` and `pol.ye_atm` where set, and otherwise s_min and the input's Yₑ,
+or `ye_fallback` where the input has none. The remaining arguments are passed
+through to the output.
+"""
+@inline function atmosphere_out(eos::AbstractEOS{S}, in::Con2PrimIn{T}, ye_fallback::T, proj::ProjectionOptions{T},
+                                pol::PolicyOptions{T}, flags::UInt32, res::C2PResult.T, it_n::Int32, it_f::Int32,
+                                solved::Bool) where {S,T}
+    ρ_min = proj_ρ_min(eos, proj)
     yₑ = pol.ye_atm
     if !isfinite(yₑ)
-        yₑ = (isfinite(in.D_Y) && isfinite(in.D) && in.D > zero(T)) ? in.D_Y / in.D : out.base.ye
+        yₑ = (isfinite(in.D_Y) && isfinite(in.D) && in.D > zero(T)) ? in.D_Y / in.D : ye_fallback
     end
-    yₑ, _ = clamp_yₑ(eos, isfinite(yₑ) ? yₑ : out.base.ye)
+    yₑ, _ = clamp_yₑ(eos, isfinite(yₑ) ? yₑ : ye_fallback)
     sr = srange(eos, ρ_min, yₑ)
     s = isfinite(pol.s_atm) ? clamp(pol.s_atm, sr.s_min, sr.s_max) : sr.s_min
 
     B² = (isfinite(in.B²) && in.B² > zero(T)) ? in.B² : zero(T)
-    b = out.base
-    return package_out(eos, PrimState{T}(ρ_min, s, yₑ, zero(T)), in, B², T(NaN), b.result, b.iters_newton,
-                       b.iters_fallback, f | FLAG_POL_ATMOSPHERE, out.solved)
+    return package_out(eos, PrimState{T}(ρ_min, s, yₑ, zero(T)), in, B², T(NaN), res, it_n, it_f, flags, solved)
+end
+
+"""
+    policy_decides(eos, in, proj, pol) -> Bool
+
+Whether [`apply_policy`](@ref) replaces the state by the atmosphere for
+*every* output of [`con2prim_safe`](@ref) on `in`, although level 1 would run
+a solve for it: a finite input with `D > 0` and `B² ≥ 0` and
+
+    ρ_min·(1 − face_slack) ≤ D < atm_trigger·ρ_min,
+
+below which level 1 decides by `D` alone, and `D` no greater than the ceiling
+`ρ_max·cosh(w_cap)·(1 + face_slack)` above which it does too (a bound that
+matters only for an `atm_trigger` above it). There the solve's answer is
+discarded, and [`policy_atmosphere`](@ref) gives the result without it:
+
+```julia
+out = policy_decides(eos, in, proj, pol) ? policy_atmosphere(eos, in, proj, pol) :
+      apply_policy(eos, in, con2prim_safe(eos, in, opts, proj), proj, pol)
+```
+
+On a table such inputs are most of a run's atmosphere and among its dearest
+recoveries: they lie on or below the coldest row, and the Newton spends its
+budget on an answer the policy throws away. Allocation-free and non-throwing,
+in a kernel too.
+"""
+@inline function policy_decides(eos::AbstractEOS{S}, in::Con2PrimIn{T}, proj::ProjectionOptions{T},
+                                pol::PolicyOptions{T}) where {S,T}
+    (con_finite(in) && in.D > zero(T) && in.B² >= zero(T)) || return false
+    # Level 1's and level 2's own comparisons, term for term, so that the
+    # bounds agree with theirs to the last bit.
+    ρ_min = proj_ρ_min(eos, proj)
+    δ = face_slack(T)
+    D = in.D
+    solves = !(D < ρ_min * (one(T) - δ)) && !(D > proj_ρ_max(eos, proj) * cosh(proj_w_cap(proj)) * (one(T) + δ))
+    return solves && !(D >= pol_atm_trigger(pol) * ρ_min)
+end
+
+"""
+    policy_atmosphere(eos, in, proj, pol) -> Con2PrimSafeOut
+
+`apply_policy(eos, in, con2prim_safe(eos, in, opts, proj), proj, pol)` without
+the level-1 solve, where [`policy_decides`](@ref): the same state, conservatives
+and `EOSPoint`, bit for bit. Its flags are `FLAG_POL_ATMOSPHERE` and level 1's
+`FLAG_POL_YE_FLOORED` or `FLAG_POL_YE_CEILED`, which need no solve; the face
+bits that would (`FLAG_POL_S_FLOORED`, sometimes `FLAG_POL_ρ_FLOORED`) are
+absent. As for level 1's other outputs without a solve, `base.result` is
+`converged_newton` with no iterations, and `solved` is false. Outside
+`policy_decides` the result is unspecified, but it does not throw.
+"""
+@inline function policy_atmosphere(eos::AbstractEOS{S}, in::Con2PrimIn{T}, proj::ProjectionOptions{T},
+                                   pol::PolicyOptions{T}) where {S,T}
+    _, ye_flags = clamp_yₑ(eos, in.D_Y / in.D)
+    return atmosphere_out(eos, in, T(NaN), proj, pol, ye_flags | FLAG_POL_ATMOSPHERE, C2PResult.converged_newton,
+                          Int32(0), Int32(0), false)
 end

@@ -77,6 +77,8 @@ rec = con2prim(v, cons, Con2PrimOptions(), s, w, pt.u_solved)   # warm-started
 # physics. Replace `apply_policy` with your own rules if they differ.
 safe = con2prim_safe(v, cons, Con2PrimOptions(), proj)
 safe = apply_policy(v, cons, safe, proj, pol)
+# Where the policy would discard level 1's answer anyway, skip the solve:
+# policy_decides(v, cons, proj, pol) && (safe = policy_atmosphere(v, cons, proj, pol))
 safe.policy_flags & FLAG_POL_ANY == 0 || @info "state repaired; adopt safe.cons"
 ```
 

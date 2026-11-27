@@ -316,6 +316,33 @@ rejected:
   output as its guess the solve needs a Newton step, where it needs none with
   the unclamped one.
 
+2026-11-27 (2.5.0). Added `policy_decides` and `policy_atmosphere`, TreeGRRMHD's
+request EOS-15. TreeGRRMHD had already skipped level 1 below the trigger
+through a workaround that read the unexported `proj_ρ_min`, `pol_atm_trigger`
+and `nan_safe_out`; in its DD2 benchmark (M1 mesh, four threads, M3 Pro) the
+skip took a step from 13.4 to 10.0 µs a cell. Its request asked for `apply_policy(…, nothing, …)` and a lower bound of
+ρ_min. Changed in the reply, and accepted by Erik and TreeGRRMHD:
+
+- The lower bound is ρ_min·(1 − face_slack), where level 1 stops deciding by D
+  alone. With ρ_min, the workaround still solved in that band and then
+  discarded the answer.
+- The Yₑ face bits are kept, since `clamp_yₑ` needs no solve, so the exception
+  to "the bits say why" covers only the bits that do.
+- A named `policy_atmosphere` rather than a `nothing` method of `apply_policy`,
+  which would have had to say what it did outside the decided region.
+- `base.result` is `converged_newton` with no iterations and `solved` false,
+  as for level 1's other outputs without a solve. `nan_safe_out`, which the
+  workaround used, said `failed_max_iter`.
+
+TreeGRRMHD added that both must run in a kernel, and must call only methods an
+EOS wrapper already forwards: its `GeometricEOS` forwards each interface method
+by hand, and once lost 58–75 µs a recovery to a missing forward. Exporting the
+option resolvers and `package_out` instead was considered: a larger API for the
+same result, and one that would make the resolution rules part of it.
+`policy_decides` also tests level 1's density ceiling, which the request did not
+mention: above it level 1 decides by D alone, and the bound matters only for an
+`atm_trigger` above ρ_max·cosh(w_cap)/ρ_min.
+
 ## β-equilibrium
 
 2026-11-20. Added cold neutrinoless β-equilibrium for initial data, which
@@ -861,6 +888,15 @@ need a bound on the window inside the table, and the sampled minimum already
 converges at three points per cell. With no bound, 0, an
 EOS samples the window on every step as before, so the analytic EOSs are
 unchanged.
+
+TreeGRRMHD then measured 2.4.3 against 2.4.2 on its DD2 star (M2 mesh, 3.9e6
+cells, Float64, one run each, with its `GeometricEOS` forwarding
+`s_width_bound`, 0.5449 on DD2). A step took 257.9 ns a cell against 269.3 on
+an H100 (−4.2%), and 407.2 against 408.9 on a 192-core node (8 ranks × 24
+threads), within noise. Its per-phase recovery rows, timed outside a step where
+every recovery is seeded cold, did not move beyond the CPU node's 5–17%
+run-to-run spread, as cold recoveries should not; the gain is in a step's warm
+recoveries.
 
 ## Testing
 
