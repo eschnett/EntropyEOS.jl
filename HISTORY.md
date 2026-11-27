@@ -848,6 +848,20 @@ every in-window `evaluate` agree in every field, and outside the window all
 fields but `iters`. Cold evaluations and `evaluate_windowed` kept their speed
 within the measurement's noise of ±5%.
 
+2026-11-27 (2.4.3). con2prim's Newton samples the entropy window only for a long
+step, through a per-table lower bound on the window's width. TreeGRRMHD measured
+2.4.2 on its M2 mesh: face fluxes 21–27% faster and a step 4.5% (H100) and 9%
+(192-core node) faster, but its recovery rows, about 290 ns per cell and step
+on the CPU node against the 41 ns EOS-14 saved, unchanged, because the
+residual still called `evaluate_windowed`. It ranked this item above EOS-16,
+whose cold-edge recoveries it bounded at 0.5% of a one-thread step on the DD2
+star. The bound is a sampled minimum halved rather than a proven one. A proof
+through the tails' slope floors was considered and not pursued: it would also
+need a bound on the window inside the table, and the sampled minimum already
+converges at three points per cell. With no bound, 0, an
+EOS samples the window on every step as before, so the analytic EOSs are
+unchanged.
+
 ## Testing
 
 2026-10-24. Added the C++ cross-check through EntropyEOS_jll. Until then every

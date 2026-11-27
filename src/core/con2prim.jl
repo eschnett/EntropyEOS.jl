@@ -109,8 +109,6 @@ intermediate quantities the caller reuses.
 The two residuals are the momentum residual `f₁ = sinh(w) - cosh(w)·V`,
 deliberately not squared so the S → 0 root stays simple rather than double,
 and the normalized energy residual `f₂ = (τ_model - τ)/max(τ, τ_floor_rel·D)`.
-`sr_ext` is the extended entropy window at `ρ`, which the Newton clamps its step
-to.
 """
 struct Residuals{T<:Real}
     s::T
@@ -118,7 +116,6 @@ struct Residuals{T<:Real}
     ρ::T
     coshw::T
     pt::EOSPoint{T}
-    sr_ext::SRange{T}
     z::T
     v_par::T
     v_perp::T
@@ -278,7 +275,7 @@ function residuals(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::
     half_sinh = sinh(T(0.5) * w)
 
     ρ = D / coshw
-    pt, sr_ext = evaluate_windowed(eos, ρ, s, yₑ, u_prev)
+    pt = evaluate(eos, ρ, s, yₑ, u_prev)
 
     h, U, p, cs² = pt.h, pt.U, pt.p, pt.cs²
     U_ρ, U_s, U_ρs = pt.U_ρ, pt.U_s, pt.U_ρs
@@ -326,7 +323,7 @@ function residuals(eos::AbstractEOS{S}, D::T, τ::T, yₑ::T, S_par::T, S_perp::
             p_w * sinhw * sinhw + T(2) * p * sinhw * coshw + B² * VdV_dw - B² * v_par * dvpar_dw
     dτ_ds = ρ * U_s * coshw * coshw + p_s * sinhw * sinhw + B² * VdV_ds - B² * v_par * dvpar_ds
 
-    return Residuals{T}(s, w, ρ, coshw, pt, sr_ext, z, v_par, v_perp, V, f1, f2, df1_ds, df1_dw,
+    return Residuals{T}(s, w, ρ, coshw, pt, z, v_par, v_perp, V, f1, f2, df1_ds, df1_dw,
                         dτ_ds / denom, dτ_dw / denom)
 end
 
@@ -859,8 +856,16 @@ function con2prim_start(eos::AbstractEOS{S}, in::Con2PrimIn{T}, opts::Con2PrimOp
         ds = (b * r.f2 - d * r.f1) / det
         dw = (c * r.f1 - a * r.f2) / det
 
-        ds_max = T(0.25) * (r.sr_ext.s_max - r.sr_ext.s_min)
-        ds = clamp(ds, -ds_max, ds_max)
+        # The step in s is clamped to a quarter of the extended window at this
+        # density. A step within a quarter of the EOS's bound on that window's
+        # width is inside the clamp whatever the window, and is taken without
+        # sampling it: on a table, two of the five or so B-spline samples of
+        # each iteration. Written so that a NaN step still goes to the clamp.
+        if !(abs(ds) <= T(0.25) * T(s_width_bound(eos)))
+            sr_ext = srange_extended(eos, r.ρ, yₑ)
+            ds_max = T(0.25) * (sr_ext.s_max - sr_ext.s_min)
+            ds = clamp(ds, -ds_max, ds_max)
+        end
         dw = clamp(dw, -one(T), one(T))
 
         # Recomputed rather than carried, so a warm start that never steps never

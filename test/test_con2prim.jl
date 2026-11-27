@@ -297,6 +297,23 @@ end
         @test maxρ < 1e-9
     end
 
+    @testset "a short Newton step needs no entropy window" begin
+        # The table's bound on its window's width lies below every window, and
+        # the Newton with it is the Newton without it, bit for bit.
+        for (T, seed) in ((Float64, 41), (Float32, 42))
+            m = width_bound_mismatches(T === Float64 ? v : E.narrow(v, Float32), StableRNG(seed), 100, T)
+            @test m.bound > 0
+            @test m.below == 0
+            @test m.solves == 0
+        end
+        # An EOS that knows no bound samples the window on every step.
+        @test E.s_width_bound(IdealGasEOS(; Γ=2.0, K_ref=100.0, s_ref=5.0, s_window=(1.0, 20.0), ρ_bounds=(1e-10, 1e-2),
+                                          yₑ_bounds=(0.0, 1.0))) == 0
+        # The bound survives narrowing and the device hop's adaptor.
+        @test E.s_width_bound(E.narrow(v, Float32)) == Float32(E.s_width_bound(v))
+        @test E.s_width_bound(Adapt.adapt(Array, v)) === E.s_width_bound(v)
+    end
+
     @testset "bracket_scan never returns an empty bracket" begin
         # The scan's candidates include both edges of the physical window
         # twice. With the root on an edge the two copies' solves can disagree

@@ -157,3 +157,46 @@ function lazy_ends_mismatches(v, rng, n, ::Type{T}=Float64) where {T}
     end
     return (; inside, outside, near_ends)
 end
+
+"""
+    width_bound_mismatches(v, rng, n, T = Float64) -> NamedTuple
+
+Check the table's bound on its extended entropy window's width, which lets
+con2prim's Newton take a short step without sampling the window. `below` counts
+points of the extended box, and beyond it, where the window is narrower than the
+bound. `solves` counts recoveries from `n` random states, some made colder than
+the table by lowering τ, that differ in any bit from the same view without the
+bound, which samples the window on every step as before.
+"""
+function width_bound_mismatches(v, rng, n, ::Type{T}=Float64) where {T}
+    E = EntropyEOS
+    v0 = typeof(v)((f === :s_width_min ? zero(T) : getfield(v, f) for f in fieldnames(typeof(v)))...)
+    bound = E.s_width_bound(v)
+    below = solves = 0
+    for _ in 1:(10n)
+        x = T(v.x_ext_lo - 1 + (v.x_ext_hi - v.x_ext_lo + 2) * rand(rng))
+        sr = srange_extended(v, exp10(x), T(v.y_lo + (v.y_hi - v.y_lo) * rand(rng)))
+        sr.s_max - sr.s_min >= bound || (below += 1)
+    end
+    opts = Con2PrimOptions{T}()
+    proj = default_projection(v, T(10 * exp10(v.x_lo)))
+    for _ in 1:n
+        xspan = v.x_hi - v.x_lo
+        ρ = T(exp10(v.x_lo + xspan * (0.02 + 0.96rand(rng))))
+        yₑ = T(v.y_lo + (v.y_hi - v.y_lo) * rand(rng))
+        sr = srange(v, ρ, yₑ)
+        s = T(sr.s_min + (sr.s_max - sr.s_min) * (0.02 + 0.96rand(rng)))
+        w = T(4rand(rng))
+        pt = evaluate(v, ρ, s, yₑ, T(NaN))
+        B² = rand(rng) < 0.2 ? zero(T) : T(exp(log(1e-6) + rand(rng) * log(1e9)) * ρ * pt.h)
+        c = prim2con(v, ρ, s, yₑ, w, B², T(2rand(rng) - 1), pt.u_solved)
+        for f in (one(T), T(0.3), T(1e-3))
+            cin = Con2PrimIn(c.D, c.τ * f, c.D_Y, c.S_par, c.S_perp, c.B²)
+            g = (s * (1 + T(1e-3)), w + T(1e-3), pt.u_solved + T(1e-3))
+            con2prim(v, cin, opts) === con2prim(v0, cin, opts) || (solves += 1)
+            con2prim(v, cin, opts, g...) === con2prim(v0, cin, opts, g...) || (solves += 1)
+            con2prim_safe(v, cin, opts, proj) === con2prim_safe(v0, cin, opts, proj) || (solves += 1)
+        end
+    end
+    return (; bound, below, solves)
+end
