@@ -289,6 +289,24 @@ end
         end
     end
 
+    @testset "a warm evaluation samples its bracket's ends only when needed" begin
+        # Bit for bit what the eager solve gives, `iters` aside where the
+        # entropy lies outside the extended window: there the end comes back
+        # after a few iterations instead of none.
+        for (T, seed) in ((Float64, 2024), (Float32, 2025))
+            m = lazy_ends_mismatches(T === Float64 ? v : E.narrow(v, Float32), StableRNG(seed), 300, T)
+            @test m.inside == 0
+            @test m.outside == 0
+            @test m.near_ends == 0
+        end
+        # A target beyond an end returns that end exactly, from either side.
+        ρ, yₑ = v.κ * E.density(tbl, 20), 0.3
+        sr = E.evaluate_windowed(v, ρ, 1.0, yₑ, NaN)[2]
+        u_mid = 0.5 * (v.u_ext_lo + v.u_ext_hi)
+        @test evaluate(v, ρ, sr.s_min - 1, yₑ, u_mid).u_solved === Float64(v.u_ext_lo)
+        @test evaluate(v, ρ, sr.s_max + 1, yₑ, u_mid).u_solved === Float64(v.u_ext_hi)
+    end
+
     @testset "allocation-free and type-generic" begin
         ρ, yₑ = v.κ * E.density(tbl, 20), 0.3
         s = synthetic_s(E.density(tbl, 20), E.temperature(tbl, 15), yₑ, opts)

@@ -243,6 +243,15 @@ else
                     end
                 end
 
+                @testset "lazy bracket ends" begin
+                    for (T, seed) in ((Float64, 31), (Float32, 32))
+                        m = lazy_ends_mismatches(T === Float64 ? v : E.narrow(v, Float32), StableRNG(seed), 200, T)
+                        @test m.inside == 0
+                        @test m.outside == 0
+                        @test m.near_ends == 0
+                    end
+                end
+
                 opts = Con2PrimOptions()
                 rng = StableRNG(987654)
                 n = 5000

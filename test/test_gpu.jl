@@ -49,6 +49,12 @@ else
             @inbounds out[i] = pt.p
         end
 
+        @eval @kernel function _gpu_eval_warm!(out, @Const(ρs), @Const(ss), @Const(us), v, yₑ)
+            i = @index(Global)
+            pt = EntropyEOS.evaluate(v, ρs[i], ss[i], yₑ, us[i])
+            @inbounds out[i] = pt.u_solved
+        end
+
         @eval @kernel function _gpu_c2p!(outρ, @Const(D), @Const(τ), @Const(DY), @Const(Sp),
                                          @Const(Sq), @Const(B2), v, opts)
             i = @index(Global)
@@ -208,6 +214,32 @@ else
                 rel = maximum(abs.(outg .- outc) ./ max.(abs.(outc), eps(T)))
                 @info "GPU evaluate: max relative difference from host" rel
                 @test rel < sqrt(eps(T)) * 100
+            end
+
+            @testset "evaluate, warm" begin
+                # The warm path samples the bracket's ends only when its solve
+                # heads for one; a fifth of the entropies lie beyond the
+                # extended window, where it returns the end itself.
+                srx = [E.evaluate_windowed(v, ρ, one(T), yₑ, T(NaN))[2] for ρ in ρs]
+                sw = T[(k % 5 == 0 ? (k % 10 == 0 ? r.s_min - 1 : r.s_max + 1) : s)
+                       for (k, (r, s)) in enumerate(zip(srx, ss))]
+                us = T[evaluate(v, ρ, s, yₑ, T(NaN)).u_solved + T(0.01) * (-1)^k
+                       for (k, (ρ, s)) in enumerate(zip(ρs, sw))]
+
+                outc = zeros(T, n)
+                _gpu_eval_warm!(CPU(), 64)(outc, ρs, sw, us, v, yₑ; ndrange=n)
+                KernelAbstractions.synchronize(CPU())
+
+                dout = DEVARRAY(zeros(T, n))
+                _gpu_eval_warm!(BACKEND, 64)(dout, DEVARRAY(ρs), DEVARRAY(sw), DEVARRAY(us), dv, yₑ; ndrange=n)
+                KernelAbstractions.synchronize(BACKEND)
+                outg = Array(dout)
+
+                @test all(isfinite, outg)
+                @test maximum(abs.(outg .- outc)) < sqrt(eps(T)) * 100
+                # Beyond the window, the end itself on either device.
+                beyond = [k % 5 == 0 for k in 1:n]
+                @test all(outg[beyond] .== ifelse.([k % 10 == 0 for k in 1:n][beyond], T(v.u_ext_lo), T(v.u_ext_hi)))
             end
 
             @testset "con2prim" begin

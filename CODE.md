@@ -176,7 +176,8 @@ types keep `AbstractFloat`, since that is an array element type.
 `srange_extended`, `logρ_bounds` and `yₑ_bounds`, and every method is typed on
 the abstract type. Two more methods are optional, because their defaults are
 built from those: `evaluate_windowed`, which the table overrides to return the
-extended window its temperature solve has already sampled, and
+extended window its temperature solve samples anyway (its `evaluate` from a
+warm start does not, [Deliberate deviations](#deliberate-deviations-from-the-c)), and
 `entropy_from_energy`, which it overrides to invert its energy field directly
 ([Deliberate deviations](#deliberate-deviations-from-the-c)). The contract is
 stated once, in `core/eos_interface.jl`. Introducing it changed no arithmetic
@@ -1018,7 +1019,30 @@ never a hard clamp, is about an EOS evaluated at a clamped point, whose zero
 derivatives stall Newton. It does not cover a search that evaluates the EOS
 only inside the box ([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)).
 
-One numerical change is for speed. Each pass of the cold seed recovers the
+Two changes are for speed. The first changes no output bit: **a warm
+`evaluate` samples its temperature bracket's ends only when its solve needs
+them.** The C++ samples both ends of the extended bracket before every
+temperature solve: two of a warm evaluation's five or so B-spline samples.
+Only the cold start's secant estimate and the early return for an entropy
+beyond the extended window read them, and the window they make is
+`evaluate_windowed`'s second result. The loop keeps its bracket in u and never
+does. So `evaluate` from a warm start samples an end only once the iteration
+heads for it while that side is still the original end, a Newton step reaching
+it or a slope allowing none, and then tests the target as the early return
+would. Inside the window its iterates are the eager solve's, so every field of
+the `EOSPoint` is too, bit for bit. An entropy beyond the window returns the end
+itself, all fields but `iters` the same; `iters` counts the iterations taken
+instead of 0. Only an entropy within the solve's residual tolerance of an end's
+value could converge on a u beside that end instead. A warm start within 10⁻³ in
+log T samples no end on any table, and one as far as 0.1 samples one end in
+every eight. `evaluate_windowed`, which con2prim's residual calls, and a cold
+start still sample both ends first. Warm evaluations on DD2 (M3 Pro, one
+thread) went from 430–440 to 290–300 ns at the root and from 650–730 to
+500–600 ns at 10⁻³ to 0.03 in log T, at Float64 and Float32 alike. This is the
+TreeGRRMHD request EOS-14, for face states and ghost-zone pressures
+([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)).
+
+The second: each pass of the cold seed recovers the
 entropy from an internal energy. The C++ does that by a safeguarded Newton in
 s, each step a full `evaluate` and so a temperature solve of its own, which
 made the seed 80% of a cold solve. The table here solves its energy field for

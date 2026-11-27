@@ -685,7 +685,7 @@ the tail exists only so the iteration stays finite rather than to make the
 answer meaningful.
 """
 @inline evaluate(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where {S,T} =
-    evaluate_windowed(v, ρ★, s, yₑ, u_guess)[1]
+    evaluate_solved(v, ρ★, s, yₑ, u_guess, false)[1]
 
 """
     locate(v, ρ★, yₑ)
@@ -721,7 +721,7 @@ placing them sets: `(x_use, y, flags)`.
 end
 
 """
-    solve_u(fld, spec, x, y, target, lo, hi, u_guess, max_iter)
+    solve_u(fld, spec, x, y, target, lo, hi, u_guess, max_iter, need_ends = true)
 
 Solve `f(x, u, y) = target` for the log-temperature `u` on `[lo, hi]`, where
 `f` is the extended field `fld` and strictly increasing in `u`. Returns
@@ -730,14 +730,35 @@ end it lies beyond, as converged.
 
 The u-tail's slope floor keeps both fields strictly increasing in `u`, so the
 bracket is globally invertible and the safeguarded iteration cannot fail.
+
+With `need_ends = false` and a warm start, the ends are sampled only when the
+iteration needs them, and `f(lo)` and `f(hi)` come back `NaN` where they were
+not. They are two of the five or so samples of a warm evaluation, and only the
+cold start's secant estimate and the early return for a target beyond an end
+read them. The loop never does: it keeps its bracket in `u`. An end is sampled
+the first time the iteration heads for it while that side of the bracket is
+still the original end — a Newton step that reaches the end, or a slope that
+allows none — and the target is then tested against it as the early return
+tests it. Where the root lies inside the bracket the iterates are therefore
+those of the eager solve, bit for bit, and so is everything returned but the
+ends; a target beyond an end returns that end after a few iterations rather
+than none. Only a target within the residual tolerance of an end's value may
+converge on a `u` beside that end instead of on the end itself.
 """
 @inline function solve_u(fld::BsplineView3{S}, spec::ExtSpec{P}, x::T, y::T, target::T, lo::T, hi::T, u_guess::T,
-                         max_iter::Int32) where {S,P,T}
-    f_lo = extended_sample(fld, x, lo, y, spec).f
-    f_hi = extended_sample(fld, x, hi, y, spec).f
+                         max_iter::Int32, need_ends::Bool=true) where {S,P,T}
+    lo₀, hi₀ = lo, hi
+    f_lo = f_hi = T(NaN)
+    # The ends not yet sampled: none on the eager path, both on the lazy one.
+    lazy = !(need_ends || isnan(u_guess))
+    lo_open = hi_open = lazy
+    if !lazy
+        f_lo = extended_sample(fld, x, lo, y, spec).f
+        f_hi = extended_sample(fld, x, hi, y, spec).f
 
-    target <= f_lo && return lo, Int32(0), true, f_lo, f_hi     # below even the extended bracket
-    target >= f_hi && return hi, Int32(0), true, f_lo, f_hi
+        target <= f_lo && return lo, Int32(0), true, f_lo, f_hi     # below even the extended bracket
+        target >= f_hi && return hi, Int32(0), true, f_lo, f_hi
+    end
 
     uu = if !isnan(u_guess)
         clamp(u_guess, lo, hi)
@@ -757,6 +778,10 @@ bracket is globally invertible and the safeguarded iteration cannot fail.
         # Maintain the bracket by sign; f increases with u.
         g < zero(T) ? (lo = uu) : (hi = uu)
 
+        # The Newton step, where the slope allows one; NaN where it does not,
+        # which no comparison accepts.
+        u_try = e.fu > zero(T) ? uu - g / e.fu : T(NaN)
+        step_inside = lo < u_try < hi
         if abs(g) <= tsolve_residual_tol(T) * f_scale
             # Take the Newton step the residual already pays for. For the
             # entropy, the tolerance admits an error of 1e-12·|s|, which is a
@@ -766,23 +791,29 @@ bracket is globally invertible and the safeguarded iteration cannot fail.
             # residual would depend on the warm start rather than on s
             # alone. One step makes that error quadratic, and is free:
             # both callers sample at the final u anyway.
-            if e.fu > zero(T)
-                u_pol = uu - g / e.fu
-                lo < u_pol < hi && (uu = u_pol)
-            end
+            step_inside && (uu = u_try)
             converged = true
-            break
         end
 
-        # Newton, accepted only if it stays inside the bracket and the
-        # slope is positive there; bisect otherwise.
-        u_next = zero(T)
-        newton_ok = false
-        if e.fu > zero(T)
-            u_next = uu - g / e.fu
-            newton_ok = lo < u_next < hi
+        # The lazy path's test of an end: the root lies beyond an original end
+        # exactly when the target does, and only a Newton step that reaches the
+        # end, or none at all, says it might. Then the target is tested as the
+        # eager path's early return tests it. Each end is sampled once at most,
+        # and an iterate on the end already has.
+        if g > zero(T) && lo_open && lo == lo₀ && !(u_try > lo₀)
+            lo_open = false
+            f_lo = uu == lo₀ ? e.f : extended_sample(fld, x, lo₀, y, spec).f
+            target <= f_lo && return lo₀, iters, true, f_lo, f_hi
+        elseif g < zero(T) && hi_open && hi == hi₀ && !(u_try < hi₀)
+            hi_open = false
+            f_hi = uu == hi₀ ? e.f : extended_sample(fld, x, hi₀, y, spec).f
+            target >= f_hi && return hi₀, iters, true, f_lo, f_hi
         end
-        newton_ok || (u_next = T(0.5) * (lo + hi))
+        converged && break
+
+        # Newton, accepted only if it stays inside the bracket and the slope is
+        # positive there; bisect otherwise.
+        u_next = step_inside ? u_try : T(0.5) * (lo + hi)
 
         du = u_next - uu
         uu = u_next
@@ -816,13 +847,24 @@ designed extension zone" and not "the input was clamped".
     return flags
 end
 
-function evaluate_windowed(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where {S,T}
+@inline evaluate_windowed(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T) where {S,T} =
+    evaluate_solved(v, ρ★, s, yₑ, u_guess, true)
+
+"""
+    evaluate_solved(v, ρ★, s, yₑ, u_guess, need_window) -> (EOSPoint, SRange)
+
+`evaluate_windowed` when `need_window`, and otherwise `evaluate` with a window
+that may hold `NaN`s: a warm start then samples the temperature bracket's ends
+only if the solve needs them ([`solve_u`](@ref)), and the point is the same bit
+for bit wherever the entropy lies inside the extended window.
+"""
+function evaluate_solved(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T, need_window::Bool) where {S,T}
     x_use, y, flags = locate(v, ρ★, yₑ)
 
     # Solve σ_ext(x_use, u, y) = s for u on the extended bracket. Its ends are
     # the extended entropy window at this point, which the caller gets for free.
     u, iters, converged, σ_lo, σ_hi = solve_u(v.σ, σ_ext_spec(v), x_use, y, s, T(v.u_ext_lo), T(v.u_ext_hi), u_guess,
-                                              v.max_iter)
+                                              v.max_iter, need_window)
     flags = landing_flags(v, u, flags, converged)
     return eval_at(v, x_use, u, y, flags, iters), SRange{T}(σ_lo, σ_hi)
 end

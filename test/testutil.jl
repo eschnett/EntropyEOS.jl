@@ -111,3 +111,49 @@ function policy_violations(eos, proj, opts, cin, out)
     end
     return bad
 end
+
+"""
+    lazy_ends_mismatches(v, rng, n, T = Float64) -> NamedTuple
+
+Compare `evaluate`, whose warm start samples the temperature bracket's ends only
+when the solve needs them, with `evaluate_windowed`, which samples them first,
+at `n` random points of the extended box and warm starts at several distances
+from each point's own temperature. A quarter of the entropies lie outside the
+extended window on either side. Returns the counts that must be zero —
+`inside`, points whose entropy lies inside the window and which differ in any
+bit, and `outside`, points beyond it that differ in anything but `iters` — and
+`near_ends`, the ends sampled by warm starts within 10⁻³ of the root in log T,
+which need none.
+"""
+function lazy_ends_mismatches(v, rng, n, ::Type{T}=Float64) where {T}
+    E = EntropyEOS
+    same(a, b; iters=true) = all(getfield(a, f) === getfield(b, f) for f in fieldnames(EOSPoint) if iters || f !== :iters)
+    inside = outside = near_ends = 0
+    lo, hi = T(v.u_ext_lo), T(v.u_ext_hi)
+    for _ in 1:n
+        x = T(v.x_ext_lo + (v.x_ext_hi - v.x_ext_lo) * rand(rng))
+        y = T(v.y_lo + (v.y_hi - v.y_lo) * rand(rng))
+        ρ = exp10(x)
+        sr = E.evaluate_windowed(v, ρ, one(T), y, T(NaN))[2]
+        width = sr.s_max - sr.s_min
+        s = T(sr.s_min - width / 4 + 3width / 2 * rand(rng))
+        in_window = sr.s_min < s < sr.s_max
+        u_root = evaluate(v, ρ, s, y, T(NaN)).u_solved
+        x_use, y_use, _ = E.locate(v, ρ, y)
+        for δ in (0, 1e-12, 1e-6, 1e-3, 0.1, 1, 10), sgn in (1, -1)
+            u_guess = u_root + T(sgn * δ)
+            a = evaluate(v, ρ, s, y, u_guess)
+            b = E.evaluate_windowed(v, ρ, s, y, u_guess)[1]
+            if in_window
+                same(a, b) || (inside += 1)
+                if δ <= 1e-3
+                    r = E.solve_u(v.σ, E.σ_ext_spec(v), x_use, y_use, s, lo, hi, u_guess, v.max_iter, false)
+                    near_ends += !isnan(r[4]) + !isnan(r[5])
+                end
+            else
+                same(a, b; iters=false) || (outside += 1)
+            end
+        end
+    end
+    return (; inside, outside, near_ends)
+end
