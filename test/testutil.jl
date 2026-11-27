@@ -158,6 +158,51 @@ function lazy_ends_mismatches(v, rng, n, ::Type{T}=Float64) where {T}
     return (; inside, outside, near_ends)
 end
 
+"""The view without its temperature seed: every cold start brackets."""
+unseeded(v) = typeof(v)((f === :seed ? EntropyEOS.empty_seed(v.σ.c) : getfield(v, f) for f in fieldnames(typeof(v)))...)
+
+"""
+    seed_mismatches(v, rng, n, T = Float64) -> NamedTuple
+
+Compare cold evaluations with and without the view's temperature seed, at `n`
+points across the extended box with the entropy spread a quarter of the
+extended window's width beyond it. `far` counts points inside the physical box
+and window whose solved log-temperatures differ by more than the solve's
+tolerances allow; `maxiter` counts points where only the seeded solve hits its
+iteration cap. `iters0` and `iters1` sum the iterations inside the box without
+and with the seed.
+"""
+function seed_mismatches(v, rng, n, ::Type{T}=Float64) where {T}
+    E = EntropyEOS
+    v0 = unseeded(v)
+    far = maxiter = iters0 = iters1 = 0
+    for _ in 1:n
+        x = T(v.x_ext_lo + (v.x_ext_hi - v.x_ext_lo) * rand(rng))
+        y = T(v.y_lo + (v.y_hi - v.y_lo) * rand(rng))
+        ρ = exp10(x)
+        sr = E.evaluate_windowed(v0, ρ, one(T), y, T(NaN))[2]
+        width = sr.s_max - sr.s_min
+        s = T(sr.s_min - width / 4 + 3width / 2 * rand(rng))
+        a = evaluate(v0, ρ, s, y, T(NaN))
+        b = evaluate(v, ρ, s, y, T(NaN))
+        (b.flags & FLAG_MAXITER != 0 && a.flags & FLAG_MAXITER == 0) && (maxiter += 1)
+        sp = srange(v, ρ, y)
+        if v.x_lo <= x <= v.x_hi && sp.s_min <= s <= sp.s_max
+            iters0 += a.iters
+            iters1 += b.iters
+            # The solve's two tolerances, its step in u and its residual in s
+            # carried into u by the slope, bound how far two converged
+            # solves from different starts may land apart.
+            x_use, y_use, _ = E.locate(v, ρ, y)
+            σ_u = E.bspline_eval3(v.σ, x_use, a.u_solved, y_use).fu
+            tol = E.tsolve_step_tol(T) * max(abs(a.u_solved), one(T)) +
+                  2 * E.tsolve_residual_tol(T) * max(abs(s), one(T)) / σ_u
+            abs(a.u_solved - b.u_solved) <= tol || (far += 1)
+        end
+    end
+    return (; far, maxiter, iters0, iters1)
+end
+
 """
     width_bound_mismatches(v, rng, n, T = Float64) -> NamedTuple
 

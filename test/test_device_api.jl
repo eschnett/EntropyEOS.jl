@@ -79,7 +79,8 @@ end
                                                v.conv_t, v.inv_c², v.x_lo, v.x_hi, v.u_lo, v.u_hi,
                                                v.y_lo, v.y_hi, v.x_ext_lo, v.x_ext_hi, v.u_ext_lo,
                                                v.u_ext_hi, v.ext_slope_floor_σ, v.ext_slope_floor_L,
-                                               v.cs²_ext_cap, v.max_iter))
+                                               v.cs²_ext_cap, v.max_iter, v.fingerprint, v.s_width_min,
+                                               E.SeedView(copyspline(v.seed.u), copy(v.seed.ab), v.seed.s₀)))
         @test v2.σ.c !== v.σ.c        # genuinely a different array
         @test v2.σ.c == v.σ.c
         n = 0

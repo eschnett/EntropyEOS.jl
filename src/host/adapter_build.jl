@@ -427,7 +427,50 @@ function build_box(t::RawTable{T}, opts::BuildOptions, fp::UInt64) where {T}
     view = EOSTableView(σ_final, L_final, κ, shift_hat, conv_t, inv_c², x_lo, x_hi, u_lo, u_hi, y_lo, y_hi,
                         x_ext_lo, x_ext_hi, u_ext_lo, u_ext_hi, T(opts.ext_slope_floor_σ),
                         T(opts.ext_slope_floor_L), T(opts.cs²_ext_cap), Int32(50), fp, window_width_bound(view))
+    # And with the temperature seed, sampled from the seedless view's cold solve.
+    view = EOSTableView(σ_final, L_final, κ, shift_hat, conv_t, inv_c², x_lo, x_hi, u_lo, u_hi, y_lo, y_hi,
+                        x_ext_lo, x_ext_hi, u_ext_lo, u_ext_hi, T(opts.ext_slope_floor_σ),
+                        T(opts.ext_slope_floor_L), T(opts.cs²_ext_cap), Int32(50), fp, view.s_width_min,
+                        build_seed(view))
     return EOSTable{T}(view, m_B_star_g, opts.m_B_table_g, audit)
+end
+
+"""
+    build_seed(v) -> SeedView
+
+The temperature seed of a view built without one ([`SeedView`](@ref)). Its grid
+spans the physical box with about half the table's points on each axis, at
+least four, and its data are the log-temperatures the view's own cold solve
+finds at η's nodes, so a seeded solve starts at the root it would reach cold,
+up to the seed's interpolation error. `s₀ = 0.01` k_B per baryon; the study
+`study/reindex.jl` found it better than `s₀ = 1`, which crowds the cold, dense
+corner's entropies into a few η cells.
+"""
+function build_seed(v::EOSTableView{T}) where {T}
+    nx, nu, ny = size(v.σ.c) .- 2
+    half(n) = max(4, cld(n - 1, 2) + 1)
+    mx, mη, my = half(nx), half(nu), half(ny)
+    xs = range(v.x_lo, v.x_hi; length=mx)
+    ys = range(v.y_lo, v.y_hi; length=my)
+    ηs = range(zero(T), one(T); length=mη)
+    s₀ = T(0.01)
+    φ(s) = asinh(s / s₀)
+    a = [φ(bspline_eval3(v.σ, T(x), T(v.u_lo), T(y)).f) for x in xs, y in ys]
+    b = [φ(bspline_eval3(v.σ, T(x), T(v.u_hi), T(y)).f) for x in xs, y in ys]
+
+    data = Array{T,3}(undef, mx, mη, my)
+    Threads.@threads for k in 1:my
+        for j in 1:mη, i in 1:mx
+            s = s₀ * sinh(a[i, k] + ηs[j] * (b[i, k] - a[i, k]))
+            data[i, j, k] = evaluate(v, exp10(T(xs[i])), s, T(ys[k]), T(NaN)).u_solved
+        end
+    end
+
+    ab = Array{T,3}(undef, mx + 2, 2, my + 2)
+    ab[:, 1, :] .= fit_bspline_2d(a)
+    ab[:, 2, :] .= fit_bspline_2d(b)
+    u = fit_bspline_3d(data, first(xs), step(xs), zero(T), step(ηs), first(ys), step(ys))
+    return SeedView(u, ab, s₀)
 end
 
 """

@@ -149,7 +149,10 @@ function test_points(v, n, rng)
     return pts
 end
 
-reference(v, pts) = [E.evaluate(v, p.ρ★, p.s, p.y, NaN) for p in pts]
+"""The view without its temperature seed (2.6.0), so that a cold start brackets as it did when this study ran."""
+unseeded(v) = typeof(v)((f === :seed ? E.empty_seed(v.σ.c) : getfield(v, f) for f in fieldnames(typeof(v)))...)
+
+reference(v, pts) = (v0 = unseeded(v); [E.evaluate(v0, p.ρ★, p.s, p.y, NaN) for p in pts])
 
 physical(pt) = pt.U_s > 0 && 0 < pt.cs² < 1
 
@@ -291,7 +294,8 @@ function seed_iterations(name, raw, opts, vf, n)
     vc = relabel_κ(EOSTableView(E.build_eos(coarsen(raw), opts)), vf.κ)
     pts = test_points(vc, n, StableRNG(7))
     pts = [(ρ★=p.ρ★, s=E.bspline_eval3(vf.σ, log10(p.ρ★), p.u, p.y).f, y=p.y, u=p.u) for p in pts]
-    cold = [E.evaluate(vf, p.ρ★, p.s, p.y, NaN) for p in pts]
+    vf0 = unseeded(vf)
+    cold = [E.evaluate(vf0, p.ρ★, p.s, p.y, NaN) for p in pts]
     it = [c.iters for c in cold]
     @printf("\n### seed table: %s; today's solve iterations, cold: mean %.2f, p99 %d, max %d\n", name,
             sum(it) / n, pct(it, 0.99), maximum(it))
@@ -300,7 +304,7 @@ function seed_iterations(name, raw, opts, vf, n)
         seeded = map(pts) do p
             x = log10(p.ρ★)
             u0 = clamp(sample(r.G, x, η_at(r, x, p.s, p.y), p.y), vf.u_ext_lo, vf.u_ext_hi)
-            return E.evaluate(vf, p.ρ★, p.s, p.y, u0)
+            return E.evaluate(vf0, p.ρ★, p.s, p.y, u0)
         end
         it = [c.iters for c in seeded]
         moved = count(i -> abs(seeded[i].u_solved - cold[i].u_solved) > 1e-10, eachindex(pts))

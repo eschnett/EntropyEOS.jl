@@ -1042,8 +1042,9 @@ never a hard clamp, is about an EOS evaluated at a clamped point, whose zero
 derivatives stall Newton. It does not cover a search that evaluates the EOS
 only inside the box ([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)).
 
-Three changes are for speed. The first two change no output bit but an
-iteration count. The first: **a warm
+Four changes are for speed. The first two change no output bit but an
+iteration count; the fourth moves a cold solve's root by no more than the
+solve's own tolerances. The first: **a warm
 `evaluate` samples its temperature bracket's ends only when its solve needs
 them.** The C++ samples both ends of the extended bracket before every
 temperature solve: two of a warm evaluation's five or so B-spline samples.
@@ -1105,6 +1106,36 @@ the synthetic one, where no state falls back
 ([HISTORY](HISTORY.md#deliberate-deviations-from-the-c)); the fallback is why,
 and running it as a second kernel is the remedy
 ([Discipline in `core/`](#discipline-in-core)).
+
+The fourth: **a cold temperature solve starts from a seed table.** With no warm
+start, the C++ samples both ends of the extended bracket and starts from their
+secant, and the solve then takes about 9 iterations on the real tables. The
+table now carries a predictor of the root (`SeedView`): log₁₀ T on
+(log ρ*, η, Yₑ), where η = (φ(s) − a)/(b − a) places the entropy in its
+column's physical window, φ = asinh(s/0.01) and a, b are φ of the entropy at the
+coldest and hottest tabulated temperature. All three are cubic B-splines on a
+grid of about half the table's points on each axis, sampled at build from the
+view's own cold solve, so the seed costs 7% of the table's memory (1.9–4.7 MiB)
+and 0.5–1 s of a one-thread build. A cold `evaluate` hands the prediction to the
+solve as its warm start, which also spares it the end samples (the first
+change). Outside the physical box the prediction comes from the box's nearest
+point, with log ρ*, Yₑ and η clamped. The solve is the same safeguarded one, so
+it reaches the same root up to its step tolerance in u and its residual
+tolerance in s carried into u; that moves U by a few units in its last place,
+and by a few hundred where U is large and steep in u (U ≈ 3·10¹¹ at the top of
+DD2's entropy, where one unit in the last place of u is a hundred in U). A test
+checks the bound on every real table. At 20,000 points per table uniform in
+(log ρ*, log T, Yₑ) inside the box, a cold solve went from 8.9–9.2 iterations
+(p99 20–23) to 3.2–3.3 (p99 5–6) at Float64 and from 7.6–7.9 to 1.8–2.0 at
+Float32: from about 13 B-spline samples to about 6. In the entropy and density
+extension bands it saves a quarter to a half of the iterations, and an entropy
+beyond the extended window costs one iteration and one end sample in place of
+the two end samples. On the synthetic table, whose cold secant is already
+nearly exact, it changes nothing inside the box and costs up to half an
+iteration in the extension bands. Not seeded: `entropy_from_energy`, which
+solves the energy field and would need a predictor indexed by energy.
+`study/reindex.jl` measured this as the survivor of a rejected re-indexing of
+the whole table by entropy ([HISTORY](HISTORY.md#re-indexing-by-entropy)).
 
 Everything else follows the C++ decision for decision, including the parts that
 look wrong until you read why: the Newton step is clamped and taken
@@ -1345,22 +1376,6 @@ Where the two can be compared, they agree.
 
 ## Open items
 
-- **(proposed)** A seed table for the temperature solve's cold start. Store
-  u = log₁₀ T on (log ρ*, η, Yₑ), with η the per-column entropy coordinate of
-  [the rejected re-indexing](HISTORY.md#re-indexing-by-entropy), and pass its
-  prediction to `solve_u` as `u_guess` wherever none is known today. The solve
-  stays the safeguarded one, so the result is today's to the solver's
-  tolerance, and a warm start also skips sampling the bracket's ends (EOS-14).
-  Measured by `study/reindex.jl` (2026-11-27) on 20,000 points per table, with
-  s₀ = 0.01: a cold solve takes 8.9–9.2 iterations on average (p99 20–23); seeded
-  from a table at full resolution, 2.8–2.9 (p99 4–5), and from one at half
-  resolution on every axis, 3.3–3.5 (p99 5–6). Seeded and cold solves reach
-  the same root except at a few points of SFHo and LS220 where σ is not
-  monotone in u, as warm starts do today. The half-resolution table is
-  1.8–4.5 MiB, against 26–67 MiB for today's two fields. Counting samples, a
-  cold `evaluate` would go from about 13 to about 7; what that is worth depends
-  on how many evaluations start cold, which the planned GPU profile should
-  show.
 - **(open)** No golden-file cross-checks against `eos_test --csv`. The invariant and
   closed-form oracles turned out strong enough that this was never needed, but
   the check-class violation sets would be cheap and exact to compare.

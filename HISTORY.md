@@ -899,6 +899,18 @@ every recovery is seeded cold, did not move beyond the CPU node's 5–17%
 run-to-run spread, as cold recoveries should not; the gain is in a step's warm
 recoveries.
 
+2026-11-27 (2.6.0). A cold temperature solve starts from a seed table
+([CODE.md](CODE.md#deliberate-deviations-from-the-c)), the survivor of the
+rejected re-indexing ([Re-indexing by entropy](#re-indexing-by-entropy)). The
+study measured a seed built from the table with every other point dropped, at
+3.3–3.5 iterations; the seed as built samples the full table's own solve on the
+same half-resolution grid and takes 3.2–3.3. A first version predicted nothing
+outside the physical box, η included; clamping to the box's nearest point
+instead cut the iterations in the extension bands from 9–11 to 5–8 on the
+real tables, with the same roots. The positional `EOSTableView` constructor
+takes the seed as an optional last argument; without it a view has an empty
+seed and brackets as before, which is also how the study's reference runs.
+
 ## Testing
 
 2026-10-24. Added the C++ cross-check through EntropyEOS_jll. Until then every
@@ -1098,5 +1110,6 @@ error of halving today's resolution. One field at nη = nu is half today's
 memory, but the tabulated temperature `T_MeV` would need a second, which
 restores parity.
 
-What survived is the seed table, a temperature predictor for today's solve
-([CODE.md](CODE.md#open-items)).
+What survived is the seed table, a temperature predictor for the solve's cold
+start, released in 2.6.0
+([CODE.md](CODE.md#deliberate-deviations-from-the-c)).

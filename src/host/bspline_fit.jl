@@ -328,3 +328,30 @@ function fit_bspline_3d(data::AbstractArray{T,3}, x0, hx, u0, hu, y0, hy) where 
 
     return BsplineView3(coeffs, x0, hx, u0, hu, y0, hy)
 end
+
+"""
+    fit_bspline_2d(data) -> Matrix
+
+The `(nx+2, ny+2)` coefficients of the tensor-product not-a-knot cubic B-spline
+through `data` on an `nx × ny` uniform grid, both `>= 4`: the 2-D analogue of
+[`fit_bspline_3d`](@ref), x fastest.
+"""
+function fit_bspline_2d(data::AbstractMatrix{T}) where {T<:AbstractFloat}
+    nx, ny = size(data)
+    (nx >= 4 && ny >= 4) || throw(ArgumentError("fit_bspline_2d: nx, ny must both be >= 4 (got ($nx, $ny))"))
+    stage = Matrix{T}(undef, nx + 2, ny)
+    lu_x = build_notaknot_factored(T, nx)
+    cx = Vector{T}(undef, nx + 2)
+    for ky in 1:ny
+        notaknot_solve!(cx, lu_x, view(data, :, ky))
+        stage[:, ky] .= cx
+    end
+    coeffs = Matrix{T}(undef, nx + 2, ny + 2)
+    lu_y = build_notaknot_factored(T, ny)
+    cy = Vector{T}(undef, ny + 2)
+    for ix in 1:(nx + 2)
+        notaknot_solve!(cy, lu_y, view(stage, ix, :))
+        coeffs[ix, :] .= cy
+    end
+    return coeffs
+end
