@@ -89,7 +89,7 @@ export
     # Solver
     Prim2ConOut, Con2PrimIn, Con2PrimOptions, Con2PrimOut, prim2con, con2prim,
     ProjectionOptions, PolicyOptions, PrimState, Con2PrimSafeOut,
-    default_projection, con2prim_safe, apply_policy,
+    default_projection, con2prim_safe, apply_policy, policy_decides, policy_atmosphere,
     Con2PrimStage, Con2PrimSafeStage, is_done, con2prim_start, con2prim_finish,
     con2prim_safe_start, con2prim_safe_finish,
     check_prim_state, project_prim_state, check_con_state, inside_window,

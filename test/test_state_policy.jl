@@ -1,3 +1,10 @@
+# Allocation probes live at top level; see the note in test_adapter_tail.jl.
+_policy_probe(v, cin, proj, pol) = policy_decides(v, cin, proj, pol) + policy_atmosphere(v, cin, proj, pol).base.ρ
+function _policy_allocs(v, cin, proj, pol)
+    _policy_probe(v, cin, proj, pol)
+    return @allocated _policy_probe(v, cin, proj, pol)
+end
+
 @testset "state policy" begin
     E = EntropyEOS
     tbl = make_synthetic_table()
@@ -363,6 +370,39 @@
         out = level2(cin, PolicyOptions(; collapse_to_atmosphere=true))
         @test has(out.policy_flags, FLAG_POL_ATMOSPHERE)
         @test has(out.policy_flags, FLAG_POL_ρ_CEILED)
+    end
+
+    @testset "policy_decides and policy_atmosphere" begin
+        # Where the policy discards every level-1 output, the pair gives
+        # apply_policy's state without the solve, bit for bit.
+        for (T, seed, trigger) in ((Float64, 61, 10), (Float32, 62, 10), (Float64, 63, 1.01))
+            m = policy_pair_mismatches(T === Float64 ? v : E.narrow(v, Float32), StableRNG(seed), 600, T;
+                                       atm_trigger=trigger)
+            @test m.decides == 0
+            @test m.state == 0
+            @test m.yes > 50 && m.no > 50
+        end
+
+        # Never for an input level 1 does not solve, and never a throw.
+        p10 = PolicyOptions(; atm_trigger=10)
+        D = 2ρ_min
+        good = Con2PrimIn(D, 1e-3D, 0.3D, 0.0, 0.0, 0.0)
+        @test policy_decides(v, good, proj, p10)
+        @test policy_atmosphere(v, good, proj, p10).policy_flags == FLAG_POL_ATMOSPHERE
+        for bad in (Con2PrimIn(NaN, 1e-3D, 0.3D, 0.0, 0.0, 0.0), Con2PrimIn(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    Con2PrimIn(-D, 1e-3D, 0.3D, 0.0, 0.0, 0.0), Con2PrimIn(D, 1e-3D, 0.3D, 0.0, 0.0, -1.0),
+                    Con2PrimIn(D, Inf, 0.3D, 0.0, 0.0, 0.0), Con2PrimIn(0.5ρ_min, 1e-3D, 0.3D, 0.0, 0.0, 0.0))
+            @test !policy_decides(v, bad, proj, p10)
+            @test policy_atmosphere(v, bad, proj, p10) isa Con2PrimSafeOut{Float64}
+        end
+        # Nor above the density ceiling, where level 1 decides by D alone.
+        huge = PolicyOptions(; atm_trigger=1e30)
+        Dc = 2ρ_max * cosh(w_cap)
+        @test !policy_decides(v, Con2PrimIn(Dc, 1e-3Dc, 0.3Dc, 0.0, 0.0, 0.0), proj, huge)
+
+        @test_noallocs _policy_allocs(v, good, proj, p10)
+        @test (@inferred policy_decides(v, good, proj, p10)) isa Bool
+        @test (@inferred policy_atmosphere(v, good, proj, p10)) isa Con2PrimSafeOut{Float64}
     end
 
     @testset "primitive states" begin

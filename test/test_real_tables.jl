@@ -252,6 +252,15 @@ else
                     end
                 end
 
+                @testset "policy_decides and policy_atmosphere" begin
+                    for (T, seed) in ((Float64, 71), (Float32, 72))
+                        m = policy_pair_mismatches(T === Float64 ? v : E.narrow(v, Float32), StableRNG(seed), 300, T)
+                        @test m.decides == 0
+                        @test m.state == 0
+                        @test m.yes > 20 && m.no > 20
+                    end
+                end
+
                 @testset "lazy bracket ends" begin
                     for (T, seed) in ((Float64, 31), (Float32, 32))
                         m = lazy_ends_mismatches(T === Float64 ? v : E.narrow(v, Float32), StableRNG(seed), 200, T)

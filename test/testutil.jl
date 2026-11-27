@@ -200,3 +200,57 @@ function width_bound_mismatches(v, rng, n, ::Type{T}=Float64) where {T}
     end
     return (; bound, below, solves)
 end
+
+"""
+    policy_pair_mismatches(v, rng, n, T = Float64; atm_trigger = 10) -> NamedTuple
+
+Check `policy_decides` and `policy_atmosphere` against
+`apply_policy(con2prim_safe(…))` on `n` random inputs, each put at a density on
+either side of both bounds — `ρ_min·(1 − face_slack)` and `atm_trigger·ρ_min`,
+a few ulps away and exactly on them — or at random between a third of the lower
+and three times the upper, with τ scaled hotter or colder and `Yₑ` partly
+outside the table. `decides` counts inputs where `policy_decides` is not
+"level 1 solves, and the policy writes the atmosphere"; `state` counts decided
+inputs whose output differs from the reference in a bit of the state, the
+conservatives or the `EOSPoint`, or whose flags, result or `solved` are not
+the documented ones. `yes` and `no` count the two answers.
+"""
+function policy_pair_mismatches(v, rng, n, ::Type{T}=Float64; atm_trigger=10) where {T}
+    E = EntropyEOS
+    opts = Con2PrimOptions{T}()
+    proj = default_projection(v, T(100 * exp10(v.x_lo)))
+    pol = PolicyOptions{T}(; atm_trigger)
+    ρ_min = E.proj_ρ_min(v, proj)
+    lo, hi = ρ_min * (one(T) - E.face_slack(T)), E.pol_atm_trigger(pol) * ρ_min
+    ye_bits = FLAG_POL_YE_FLOORED | FLAG_POL_YE_CEILED
+    decides = state = yes = no = 0
+    for k in 1:n
+        ρ = T(exp10(v.x_lo + (v.x_hi - v.x_lo) * rand(rng)))
+        yₑ = T(v.y_lo + (v.y_hi - v.y_lo) * rand(rng))
+        sr = srange(v, ρ, yₑ)
+        s = T(sr.s_min + (sr.s_max - sr.s_min) * rand(rng))
+        h = evaluate(v, ρ, s, yₑ, T(NaN)).h
+        B² = rand(rng) < 0.3 ? zero(T) : T(exp10(-3 + 4rand(rng))) * ρ * h
+        c = prim2con(v, ρ, s, yₑ, T(2rand(rng)), B², T(2rand(rng) - 1), T(NaN))
+        edge = rand(rng, (lo, hi))
+        D = k % 3 == 0 ? T(exp(log(lo / 3) + rand(rng) * log(9hi / lo))) :
+            k % 3 == 1 ? edge : (rand(rng, (prevfloat, nextfloat)))(edge, rand(rng, 1:3))
+        f = D / c.D
+        ye_in = rand(rng) < 0.2 ? T(v.y_lo + (v.y_hi - v.y_lo) * (3rand(rng) - 1)) : yₑ
+        cin = Con2PrimIn(D, c.τ * f * T(rand(rng, (1, 1e-3, 1e3))), ye_in * D, c.S_par * f, c.S_perp * f, c.B² * f)
+        ref = apply_policy(v, cin, con2prim_safe(v, cin, opts, proj), proj, pol)
+        dec = policy_decides(v, cin, proj, pol)
+        dec ? (yes += 1) : (no += 1)
+        dec == (ref.solved && !(cin.D >= E.pol_atm_trigger(pol) * ρ_min)) || (decides += 1)
+        dec || continue
+        out = policy_atmosphere(v, cin, proj, pol)
+        a, b = out.base, ref.base
+        same = all(getfield(a, f) === getfield(b, f) for f in (:ρ, :s, :ye, :w, :W, :v_par, :v_perp, :eos, :flags)) &&
+               out.cons === ref.cons &&
+               out.policy_flags == FLAG_POL_ATMOSPHERE | (ref.policy_flags & ye_bits) &&
+               a.result === E.C2PResult.converged_newton && a.iters_newton == 0 && a.iters_fallback == 0 &&
+               !out.solved
+        same || (state += 1)
+    end
+    return (; decides, state, yes, no)
+end
