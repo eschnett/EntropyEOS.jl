@@ -1264,6 +1264,11 @@ What is easy to get wrong here:
   those calls are a few percent of the work, and an NQT axis spoils the C²
   fit's p and cs² near every power of two
   ([HISTORY](HISTORY.md#not-quite-transcendental-functions)).
+- **Re-indexing the table by entropy does not pay.** A table on
+  (log ρ*, η(s), Yₑ) would remove the temperature solve, but resampling the
+  table's (ρ, T) data onto it adds about the error of halving today's
+  resolution, in U_s and p, and makes cs² or U_s unphysical at up to 1.4% of
+  points ([HISTORY](HISTORY.md#re-indexing-by-entropy)).
 
 ## Validation against the C++
 
@@ -1340,6 +1345,22 @@ Where the two can be compared, they agree.
 
 ## Open items
 
+- **(proposed)** A seed table for the temperature solve's cold start. Store
+  u = log₁₀ T on (log ρ*, η, Yₑ), with η the per-column entropy coordinate of
+  [the rejected re-indexing](HISTORY.md#re-indexing-by-entropy), and pass its
+  prediction to `solve_u` as `u_guess` wherever none is known today. The solve
+  stays the safeguarded one, so the result is today's to the solver's
+  tolerance, and a warm start also skips sampling the bracket's ends (EOS-14).
+  Measured by `study/reindex.jl` (2026-11-27) on 20,000 points per table, with
+  s₀ = 0.01: a cold solve takes 8.9–9.2 iterations on average (p99 20–23); seeded
+  from a table at full resolution, 2.8–2.9 (p99 4–5), and from one at half
+  resolution on every axis, 3.3–3.5 (p99 5–6). Seeded and cold solves reach
+  the same root except at a few points of SFHo and LS220 where σ is not
+  monotone in u, as warm starts do today. The half-resolution table is
+  1.8–4.5 MiB, against 26–67 MiB for today's two fields. Counting samples, a
+  cold `evaluate` would go from about 13 to about 7; what that is worth depends
+  on how many evaluations start cold, which the planned GPU profile should
+  show.
 - **(open)** No golden-file cross-checks against `eos_test --csv`. The invariant and
   closed-form oracles turned out strong enough that this was never needed, but
   the check-class violation sets would be cheap and exact to compare.
