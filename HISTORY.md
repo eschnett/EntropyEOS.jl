@@ -832,6 +832,22 @@ Superseded by it: the two-kernel gain on the real tables was 1.5–2.7, from
 SFHo's 1.4 → 2.1 to DD2's 1.8 → 4.8 million states per second; it is now
 1.8–2.7.
 
+2026-11-26 (2.4.2). A warm `evaluate` samples its temperature bracket's ends
+lazily, for TreeGRRMHD's request EOS-14: its face states and ghost-zone
+pressures are 72% of a right-hand side on its DD2 star, all warm evaluations,
+and half of each temperature solve was the two end samples. The first version
+sampled an end whenever its Newton step was not accepted. At an exact warm start
+the residual is already within tolerance and the closing Newton step rounds onto
+the iterate itself, which the bracket test rejects, so 62% of those evaluations
+on DD2 still sampled an end. Testing instead whether the step reaches the
+original end leaves none for warm starts within 10⁻³ in log T. Compared bit for
+bit with 2.4.1 in a separate process, at 96,000 points on DD2 at Float64 and
+Float32 and on the synthetic table, warm starts 0 to 10 away in log T and a
+quarter of the entropies outside the extended window: `evaluate_windowed` and
+every in-window `evaluate` agree in every field, and outside the window all
+fields but `iters`. Cold evaluations and `evaluate_windowed` kept their speed
+within the measurement's noise of ±5%.
+
 ## Testing
 
 2026-10-24. Added the C++ cross-check through EntropyEOS_jll. Until then every
