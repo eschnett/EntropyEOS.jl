@@ -261,6 +261,15 @@ else
                     end
                 end
 
+                @testset "temperature seed" begin
+                    for (T, seed) in ((Float64, 41), (Float32, 42))
+                        m = seed_mismatches(T === Float64 ? v : E.narrow(v, Float32), StableRNG(seed), 1000, T)
+                        @test m.far == 0
+                        @test m.maxiter == 0
+                        @test m.iters1 < m.iters0 / 2
+                    end
+                end
+
                 @testset "lazy bracket ends" begin
                     for (T, seed) in ((Float64, 31), (Float32, 32))
                         m = lazy_ends_mismatches(T === Float64 ? v : E.narrow(v, Float32), StableRNG(seed), 200, T)

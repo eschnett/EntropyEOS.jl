@@ -307,6 +307,28 @@ end
         @test evaluate(v, ρ, sr.s_max + 1, yₑ, u_mid).u_solved === Float64(v.u_ext_hi)
     end
 
+    @testset "the temperature seed" begin
+        # About half the table's points on each axis, at least four.
+        @test size(v.seed.u.c) == (cld(size(tbl)[1] - 1, 2) + 3, cld(size(tbl)[2] - 1, 2) + 3,
+                                   cld(size(tbl)[3] - 1, 2) + 3)
+        ρ, yₑ = v.κ * E.density(tbl, 20), 0.3
+        s = synthetic_s(E.density(tbl, 20), E.temperature(tbl, 15), yₑ, opts)
+        x, y, _ = E.locate(v, ρ, yₑ)
+        @test isnan(E.seed_u(E.empty_seed(v.σ.c), x, y, s))
+        @test isnan(E.seed_u(v.seed, x, y, NaN))
+        # Close to the root at a node, and clamped outside the window.
+        @test abs(E.seed_u(v.seed, x, y, s) - evaluate(v, ρ, s, yₑ, NaN).u_solved) < 0.01
+        sr = srange(v, ρ, yₑ)
+        @test E.seed_u(v.seed, x, y, sr.s_max + 1) == E.seed_u(v.seed, x, y, 2sr.s_max + 1)
+        # Seeded or not, the solve reaches the same root.
+        for (T, seed) in ((Float64, 77), (Float32, 78))
+            m = seed_mismatches(T === Float64 ? v : E.narrow(v, Float32), StableRNG(seed), 400, T)
+            @test m.far == 0
+            @test m.maxiter == 0
+        end
+        @test E.narrow(v, Float32).seed isa E.SeedView{Float32}
+    end
+
     @testset "allocation-free and type-generic" begin
         ρ, yₑ = v.κ * E.density(tbl, 20), 0.3
         s = synthetic_s(E.density(tbl, 20), E.temperature(tbl, 15), yₑ, opts)

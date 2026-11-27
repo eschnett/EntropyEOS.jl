@@ -116,6 +116,95 @@ ExtSpec(x_lo::T, x_hi::T, u_lo::T, u_hi::T, x_ext_lo::T, u_m_floor::T, x_low_log
     ExtSpec{T}(x_lo, x_hi, u_lo, u_hi, x_ext_lo, u_m_floor, x_low_log, u_high_log, u_high_b_cap, shift_hat, inv_c²)
 
 # ---------------------------------------------------------------------------
+# The temperature seed
+# ---------------------------------------------------------------------------
+
+"""
+    SeedView
+
+A predictor of the temperature solve's root, used where a call has no warm
+start: log₁₀ T on `(x, η, y)`, with η the entropy's place in its column's
+physical window,
+
+    φ(s) = asinh(s / s₀),   η = (φ(s) − a(x, y)) / (b(x, y) − a(x, y)),
+
+where `a` and `b` are φ of the entropy at the coldest and hottest tabulated
+temperature. `asinh` is ln-like for s ≫ s₀ and total on the negative entropies
+some tables have on their cold edge. All three are cubic B-splines on one
+`(x, y)` grid at about half the table's resolution: `u` is a
+[`BsplineView3`](@ref) whose middle axis is η on `[0, 1]`, and `ab` holds the
+2-D coefficients of `a` and `b` as its two middle planes.
+
+The seed is only a starting point; the safeguarded solve still finds the root,
+the same one up to the solve's step tolerance wherever the root is unique. An
+empty seed (`u` with no coefficients) predicts nothing.
+"""
+struct SeedView{T<:AbstractFloat,A<:AbstractArray{T,3}}
+    u::BsplineView3{T,A}
+    ab::A
+    s₀::T
+end
+
+"""A seed that predicts nothing, on the array type of `c`."""
+function empty_seed(c::AbstractArray{T,3}) where {T}
+    z = similar(c, 0, 0, 0)
+    return SeedView(BsplineView3(z, zero(T), one(T), zero(T), one(T), zero(T), one(T)), similar(c, 0, 0, 0), one(T))
+end
+
+"""
+    seed_u(sd, x, y, s)
+
+The seed's log-temperature at log-density `x`, `Yₑ = y` and entropy `s`, or
+`NaN` for an empty seed or a non-finite η, where the solve starts from its
+bracket as it would without a seed.
+
+Outside the physical box the seed predicts from its nearest point: `(x, y)` is
+clamped to its grid and η to `[0, 1]`, so an entropy beyond the physical
+window starts at that window's edge. On the real tables that still saves a
+quarter to a half of the iterations in the extension bands. A target beyond
+even the extended window then costs one iteration and one end sample, where
+the bracket start costs its two end samples.
+"""
+@inline function seed_u(sd::SeedView{S}, x::T, y::T, s::T) where {S,T}
+    g = sd.u
+    nx, nη, ny = npoints_x(g), npoints_u(g), npoints_y(g)
+    nx >= 4 || return T(NaN)
+    x = clamp(x, T(g.x0), T(g.x0) + T(nx - 1) * T(g.hx))
+    y = clamp(y, T(g.y0), T(g.y0) + T(ny - 1) * T(g.hy))
+
+    cx = bspline_cell(x, T(g.x0), T(g.hx), nx)
+    cy = bspline_cell(y, T(g.y0), T(g.hy), ny)
+    bx = bspline_basis(cx.t)
+    by = bspline_basis(cy.t)
+    bxt = (bx.b0, bx.b1, bx.b2, bx.b3)
+    byt = (by.b0, by.b1, by.b2, by.b3)
+
+    a = zero(T)
+    b = zero(T)
+    @inbounds for r in 0:3, p in 0:3
+        w = bxt[p + 1] * byt[r + 1]
+        a += w * T(sd.ab[cx.i + p, 1, cy.i + r])
+        b += w * T(sd.ab[cx.i + p, 2, cy.i + r])
+    end
+    η = (asinh(s / T(sd.s₀)) - a) / (b - a)
+    isnan(η) && return T(NaN)
+    η = clamp(η, zero(T), one(T))
+
+    cη = bspline_cell(η, zero(T), T(g.hu), nη)
+    bη = bspline_basis(cη.t)
+    bηt = (bη.b0, bη.b1, bη.b2, bη.b3)
+    u = zero(T)
+    @inbounds for r in 0:3, q in 0:3
+        sx = zero(T)
+        for p in 0:3
+            sx += bxt[p + 1] * T(g.c[cx.i + p, cη.i + q, cy.i + r])
+        end
+        u += bηt[q + 1] * byt[r + 1] * sx
+    end
+    return u
+end
+
+# ---------------------------------------------------------------------------
 # The view
 # ---------------------------------------------------------------------------
 
@@ -165,6 +254,9 @@ struct EOSTableView{T<:AbstractFloat,A<:AbstractArray{T,3}} <: AbstractEOS{T}
     # so that con2prim's Newton knows its step clamp is inactive without
     # sampling the window; 0 when unknown, which always samples it.
     s_width_min::T
+
+    # The temperature solve's cold-start predictor; empty when not built.
+    seed::SeedView{T,A}
 end
 
 logρ_bounds(v::EOSTableView) = (v.x_lo, v.x_hi)
@@ -867,9 +959,13 @@ for bit wherever the entropy lies inside the extended window.
 function evaluate_solved(v::EOSTableView{S}, ρ★::T, s::T, yₑ::T, u_guess::T, need_window::Bool) where {S,T}
     x_use, y, flags = locate(v, ρ★, yₑ)
 
+    # With no warm start, the seed table supplies one where it can. The solve
+    # is the same safeguarded one either way; it only starts nearer the root.
+    u_start = isnan(u_guess) ? seed_u(v.seed, x_use, y, s) : u_guess
+
     # Solve σ_ext(x_use, u, y) = s for u on the extended bracket. Its ends are
     # the extended entropy window at this point, which the caller gets for free.
-    u, iters, converged, σ_lo, σ_hi = solve_u(v.σ, σ_ext_spec(v), x_use, y, s, T(v.u_ext_lo), T(v.u_ext_hi), u_guess,
+    u, iters, converged, σ_lo, σ_hi = solve_u(v.σ, σ_ext_spec(v), x_use, y, s, T(v.u_ext_lo), T(v.u_ext_hi), u_start,
                                               v.max_iter, need_window)
     flags = landing_flags(v, u, flags, converged)
     return eval_at(v, x_use, u, y, flags, iters), SRange{T}(σ_lo, σ_hi)
